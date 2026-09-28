@@ -70,9 +70,22 @@ Copy and use this template for your code reviews.
 - [ ] No SQL/XSS injection risks
 - [ ] CSRF protection for state-changing operations
 - [ ] Sensitive data not leaked in logs/errors
-- [ ] Dependency vulnerabilities checked (npm audit / pip audit / cargo audit)
+- [ ] Dependency vulnerabilities checked (npm audit / pip-audit)
 
 > See [Security Review Guide](../reference/security-review-guide.md) for comprehensive injection, XSS, CSRF, secrets, and auth checklist.
+
+## Salesforce Considerations
+
+[Include when the PR touches Salesforce code or metadata; delete otherwise.]
+
+- [ ] Static review only: no org commands were run (no deploys, Apex or test runs, or data queries)
+- [ ] Bulk and limit reasoning at 200+ records (SOQL, DML, callouts, and CPU time per transaction)
+- [ ] Sharing, CRUD, and FLS correct for each file's `apiVersion`
+- [ ] Tests cover bulk, negative, and `System.runAs` cases, with asserts and callout mocks
+- [ ] Metadata and deployment impact checked: FLS for new fields, destructive changes, flow activation, manifests
+- [ ] Automation overlap checked: triggers, flows, and validation rules on the same object
+
+> See [Salesforce Platform Guide](../reference/salesforce/platform.md).
 
 ## Test Coverage
 
@@ -100,6 +113,20 @@ Copy and use this template for your code reviews.
 
 **Suggested fix:**
 \`\`\`typescript
+// Your suggested code
+\`\`\`
+```
+
+### Blocking Issue (Salesforce)
+```
+🔴 **[blocking]** [Title, for example "SOQL query inside a loop"]
+
+[Description with the limit math, for example "200 records in one trigger chunk → 200 queries → System.LimitException"]
+
+**Location:** `force-app/main/default/classes/AccountService.cls:42`
+
+**Suggested fix:**
+\`\`\`apex
 // Your suggested code
 \`\`\`
 ```

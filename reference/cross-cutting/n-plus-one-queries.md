@@ -1,53 +1,53 @@
-# N+1 查询问题 — 跨语言通用指南
+# N+1 Queries: Cross-Language Guide
 
-> N+1 查询是 ORM 和数据库访问层最常见的性能反模式。本文档覆盖问题定义、检测方法、通用解决方案和跨语言代码示例。
+> N+1 queries are the most common performance anti-pattern in ORMs and data-access layers. This guide covers the problem definition, detection methods, general solutions, and code examples for JavaScript/TypeScript (Prisma, TypeORM, GraphQL DataLoader), Python (SQLAlchemy), and Salesforce Apex (SOQL, LWC, Flow).
 
-## 目录
+## Table of Contents
 
-- [问题定义](#问题定义)
-- [性能影响](#性能影响)
-- [检测方法](#检测方法)
-- [通用解决方案](#通用解决方案)
-- [语言特定实现](#语言特定实现)
+- [Problem Definition](#problem-definition)
+- [Performance Impact](#performance-impact)
+- [Detection](#detection)
+- [General Solutions](#general-solutions)
+- [Language-Specific Implementations](#language-specific-implementations)
 - [Review Checklist](#review-checklist)
 
 ---
 
-## 问题定义
+## Problem Definition
 
-N+1 查询是指：**1 次查询获取 N 条记录，随后在循环中触发 N 次额外查询**来获取关联数据。
+An N+1 query happens when **one query fetches N records and a loop then triggers N more queries** to fetch the related data.
 
 ```
-请求流程:
-  1 query   → 获取 N 条主记录
-  N queries → 每条主记录查一次关联数据
+Request flow:
+  1 query   → fetch N parent records
+  N queries → one query per parent record for its related data
   ─────────
   Total: 1 + N queries
 ```
 
-### 危害
+### Why it hurts
 
-| 问题 | 影响 |
+| Problem | Impact |
 |------|------|
-| **查询数量线性增长** | 100 条记录 = 101 条 SQL，1000 条 = 1001 条 |
-| **网络延迟叠加** | 每条查询都有往返延迟（RTT），N 次往返 >> 1 次批量查询 |
-| **连接池耗尽** | 大量查询占满数据库连接，拖慢整个应用 |
-| **难以在开发中发现** | 开发环境数据少，N+1 不明显；生产环境数据量大时性能崩塌 |
+| **Query count grows linearly** | 100 records = 101 SQL queries; 1,000 records = 1,001 |
+| **Network latency adds up** | Every query pays a round trip (RTT); N round trips >> 1 batched query |
+| **Connection pool exhaustion** | A flood of queries ties up database connections and slows down the whole application |
+| **Hard to spot in development** | Development data sets are small, so N+1 goes unnoticed; performance collapses at production data volumes |
 
 ---
 
-## 性能影响
+## Performance Impact
 
-### 场景对比：获取 100 个用户及其订单
+### Scenario: fetching 100 users and their orders
 
-| 方案 | SQL 数量 | 延迟（假设 RTT=1ms） | 适用场景 |
+| Approach | SQL queries | Latency (assuming RTT = 1 ms) | When to use |
 |------|----------|---------------------|---------|
-| N+1 懒加载 | 101 条 | ~101ms | 极少数据量 |
-| Eager loading (JOIN) | 1 条 | ~1ms | 一对多，数据量适中 |
-| Eager loading (IN) | 2 条 | ~2ms | 多对多，大数据集 |
-| DataLoader / batch | 2 条 | ~2ms | GraphQL / 复杂图查询 |
+| N+1 lazy loading | 101 | ~101 ms | Very small data sets only |
+| Eager loading (JOIN) | 1 | ~1 ms | One-to-many, moderate data volume |
+| Eager loading (IN) | 2 | ~2 ms | Many-to-many, large data sets |
+| DataLoader / batch | 2 | ~2 ms | GraphQL / complex graph queries |
 
-### SQL 数量对比
+### SQL query count comparison
 
 ```sql
 -- ❌ N+1: 1 + 100 = 101 queries
@@ -64,204 +64,150 @@ SELECT * FROM orders WHERE user_id IN (1,2,...,100);
 
 ---
 
-## 检测方法
+## Detection
 
-### 1. ORM SQL 日志
+### 1. ORM SQL logs
 
-开启 SQL 日志，在测试或开发环境中观察查询数量：
+Turn on SQL logging and watch the query count in tests or in development:
 
 ```python
-# Django
-import logging
-logging.getLogger('django.db.backends').setLevel(logging.DEBUG)
-
 # SQLAlchemy
 import logging
 logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
+# or: engine = create_engine(url, echo=True)
 ```
 
-```java
-// Spring Boot application.yml
-spring:
-  jpa:
-    show-sql: true
-    properties:
-      hibernate.format_sql: true
+```typescript
+// Prisma: print every query (adapter is the driver adapter, required from Prisma ORM 7)
+const prisma = new PrismaClient({ adapter, log: ['query'] });
+
+// TypeORM: log SQL (logging: ['query'] limits the output to queries)
+const dataSource = new DataSource({
+    type: 'postgres',
+    url: process.env.DATABASE_URL,
+    entities: [User, Post],
+    logging: true,
+});
 ```
 
-```csharp
-// EF Core
-optionsBuilder.LogTo(Console.WriteLine, LogLevel.Information);
-```
+### 2. Query-count assertions
 
-### 2. 查询计数断言
-
-在测试中断言 SQL 查询数量：
+Assert the number of SQL queries in tests:
 
 ```python
-# Django: django-assert-num-queries
-from django.test.utils import CaptureQueriesContext
-from django.db import connection
+# SQLAlchemy: count statements with a cursor event, then remove the listener
+from contextlib import contextmanager
 
-with CaptureQueriesContext(connection) as ctx:
-    list(User.objects.select_related("profile").all())
-assert len(ctx) <= 2  # 预期最多 2 条查询
+from sqlalchemy import event, select
+from sqlalchemy.orm import joinedload
+
+
+@contextmanager
+def count_queries(engine):  # for an AsyncEngine, pass engine.sync_engine
+    statements: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def on_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", on_execute)
+
+
+with count_queries(engine) as statements:
+    session.scalars(select(User).options(joinedload(User.profile))).all()
+assert len(statements) <= 2  # expect at most 2 queries
 ```
 
-```java
-// Hibernate: p6spy 或 datasource-proxy
-// 在测试中统计 SQL 执行次数
-assertThat(sqlCount).isLessThanOrEqualTo(2);
+```typescript
+// Prisma: emit query events and count them
+const prisma = new PrismaClient({ adapter, log: [{ emit: 'event', level: 'query' }] });
+let queryCount = 0;
+prisma.$on('query', () => {
+    queryCount += 1;
+});
+
+it('loads users with their posts in at most 2 queries', async () => {
+    queryCount = 0;
+    await prisma.user.findMany({ include: { posts: true } });
+    expect(queryCount).toBeLessThanOrEqual(2);
+});
 ```
 
-### 3. APM / 数据库监控工具
+```apex
+// Apex test: accountIds holds 200 test Accounts, so a per-record query would show up
+Integer before = Limits.getQueries();
+AccountService.loadContacts(accountIds);
+Assert.isTrue(Limits.getQueries() - before <= 2, 'expected at most 2 queries');
+```
 
-- **Django Debug Toolbar** — 实时显示 SQL 数量和时间
-- **p6spy** (Java) — JDBC 层拦截，记录所有 SQL
-- **MiniProfiler** (.NET) — 页面内嵌 SQL 统计
-- **DataDog / New Relic** — 生产环境慢查询告警
+### 3. APM / database monitoring tools
+
+- **ORM query logs**: per-request query counts in development and tests (SQLAlchemy `echo`, Prisma `log`, TypeORM `logging`)
+- **OpenTelemetry database spans**: database instrumentation records every query as a child span of the request, so a run of identical spans stands out
+- **APM (Datadog, New Relic)**: slow-query alerts and N+1 detection in production
+- **Salesforce**: the review is static, so ask the author for a debug log or test output that shows the SOQL query count at bulk volume
 
 ---
 
-## 通用解决方案
+## General Solutions
 
-### 方案 1: Eager Loading（JOIN 预加载）
+### Solution 1: Eager loading (JOIN)
 
-一次 JOIN 查询获取主记录和关联记录。适用于一对一、一对多。
+Fetch the parent records and their related records in one JOIN query. Suits one-to-one and one-to-many relationships; for large or multiple collections the JOIN repeats every parent row, so prefer Solution 2 there.
 
-### 方案 2: Batch Fetching（IN 子句批量查询）
+### Solution 2: Batch fetching (IN clause)
 
-两次查询：主记录 + `WHERE id IN (...)` 批量获取关联记录。适用于多对多、大数据集。
+Two queries: the parent records, then `WHERE id IN (...)` to fetch all related records at once. Suits many-to-many relationships and large data sets.
 
-### 方案 3: DataLoader Pattern
+### Solution 3: DataLoader pattern
 
-在 GraphQL 或复杂图查询场景中，收集所有需要的 ID，合并为一次批量查询。
+In GraphQL or other complex graph queries, collect every ID that is needed and merge them into one batch query.
 
 ```
-// DataLoader 伪代码
+// DataLoader pseudocode
 class DataLoader<K, V> {
-    load(K key) → V         // 注册需求，不立即查询
-    loadAll([K]) → [V]      // 合并为一次批量查询
+    load(K key) → V         // register the need; do not query yet
+    loadAll([K]) → [V]      // merge into one batch query
 }
 ```
 
-### 方案 4: Projection（投影）
+### Solution 4: Projection
 
-只查询需要的字段，减少数据传输量：
+Query only the fields you need, to cut the amount of data transferred:
 
 ```sql
--- ❌ 获取所有列
+-- ❌ Fetches every column
 SELECT * FROM users JOIN profiles ON ...
 
--- ✅ 只投影需要的字段
+-- ✅ Projects only the fields you need
 SELECT u.name, p.avatar_url FROM users u JOIN profiles p ON ...
 ```
 
 ---
 
-## 语言特定实现
+## Language-Specific Implementations
 
-### Python / Django
-
-> 详见 [Django Guide](../django.md#n1-查询优化)
+### Python / SQLAlchemy
 
 ```python
-# ForeignKey / OneToOne → select_related (SQL JOIN)
-books = Book.objects.select_related("publisher")
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload, raiseload, selectinload
 
-# M2M / reverse FK → prefetch_related (2 queries + Python merge)
-authors = Author.objects.prefetch_related("books")
+# ❌ N+1: every order.customer access lazy-loads one row
+for order in session.scalars(select(Order)).all():
+    print(order.customer.name)
 
-# 嵌套预加载
-authors = Author.objects.prefetch_related("books__publisher")
-
-# Prefetch 对象精细控制
-from django.db.models import Prefetch
-authors = Author.objects.prefetch_related(
-    Prefetch("books", queryset=Book.objects.filter(published=True), to_attr="published_books")
-)
-```
-
-### Python / SQLAlchemy (FastAPI)
-
-> 详见 [FastAPI Guide](../fastapi.md#database-sessions--n1)
-
-```python
-from sqlalchemy.orm import selectinload
-
-# selectinload: IN 子句批量加载（推荐异步场景）
+# selectinload: batch loading with an IN clause (recommended for async code)
 stmt = select(Order).options(selectinload(Order.customer))
 
-# joinedload: JOIN 加载
+# joinedload: loading with a JOIN
 stmt = select(Order).options(joinedload(Order.customer))
-```
 
-### Java / JPA (Spring Boot)
-
-> 详见 [Java Guide](../java.md)
-
-```java
-// ❌ FetchType.EAGER 或循环中触发懒加载
-@OneToMany(fetch = FetchType.EAGER)  // 危险！
-
-// ✅ JOIN FETCH
-@Query("SELECT u FROM User u JOIN FETCH u.orders")
-List<User> findAllWithOrders();
-
-// ✅ @EntityGraph（声明式）
-@EntityGraph(attributePaths = {"orders", "profile"})
-List<User> findAll();
-
-// ✅ @BatchSize（减少 N+1 为 N/batchSize + 1）
-@OneToMany
-@BatchSize(size = 50)
-private List<Order> orders;
-```
-
-### C# / EF Core
-
-> 详见 [C# Guide](../csharp.md)
-
-```csharp
-// ❌ N+1: foreach 触发懒加载
-foreach (var blog in await context.Blogs.ToListAsync())
-    foreach (var post in blog.Posts)  // 每次循环都查询！
-
-// ✅ Include + ThenInclude
-var blogs = await context.Blogs
-    .Include(b => b.Posts)
-    .ToListAsync();
-
-// ✅ 投影（最安全，避免过度获取）
-var data = await context.Blogs
-    .Select(b => new { b.Url, PostTitles = b.Posts.Select(p => p.Title) })
-    .ToListAsync();
-```
-
-### PHP / Laravel / Doctrine
-
-> 详见 [PHP Guide](../php.md)
-
-```php
-// ❌ 循环内查询
-foreach ($orders as $order) {
-    $customer = $customerRepo->find($order->customerId);
-    render($order, $customer);
-}
-
-// ✅ 批量预加载
-$customerIds = array_unique(array_map(fn($o) => $o->customerId, $orders));
-$customers = $customerRepo->findByIds($customerIds);
-
-foreach ($orders as $order) {
-    render($order, $customers[$order->customerId] ?? null);
-}
-
-// Laravel Eloquent: with()
-$orders = Order::with('customer')->get();
-
-// Doctrine: JOIN FETCH
-$dql = 'SELECT o, c FROM Order o JOIN o.customer c';
+# 💡 raiseload turns any accidental lazy load into an error, so N+1 fails fast in tests
+stmt = select(Order).options(selectinload(Order.customer), raiseload("*"))
 ```
 
 ### TypeScript / Prisma
@@ -273,12 +219,12 @@ for (const user of users) {
     user.posts = await prisma.post.findMany({ where: { userId: user.id } });
 }
 
-// ✅ include（Prisma 自动生成 JOIN 或批量查询）
+// ✅ include (Prisma generates a JOIN or batched queries for you)
 const users = await prisma.user.findMany({
     include: { posts: true },
 });
 
-// ✅ 嵌套 include
+// ✅ Nested include
 const users = await prisma.user.findMany({
     include: {
         posts: {
@@ -288,22 +234,147 @@ const users = await prisma.user.findMany({
 });
 ```
 
+### Node.js / GraphQL DataLoader
+
+A field resolver runs once per parent object, so a list of 100 users means 100 `posts` lookups. DataLoader collects every `load()` call made in the same tick and hands them to one batch function.
+
+```javascript
+import DataLoader from 'dataloader';
+
+// ❌ N+1: this resolver runs once per User in the list, one query each
+const userResolversNaive = {
+    posts: (user) => prisma.post.findMany({ where: { userId: user.id } }),
+};
+
+// ✅ One loader per request: all loads from the same tick become one IN query
+export function createLoaders() {
+    return {
+        postsByUserId: new DataLoader(async (userIds) => {
+            const posts = await prisma.post.findMany({ where: { userId: { in: [...userIds] } } });
+            const byUser = Map.groupBy(posts, (post) => post.userId); // ES2024, Node.js 21+
+            return userIds.map((id) => byUser.get(id) ?? []); // same length and order as the keys
+        }),
+    };
+}
+
+const userResolvers = {
+    posts: (user, _args, context) => context.loaders.postsByUserId.load(user.id),
+};
+```
+
+Create the loaders in the per-request context factory, never at module level: DataLoader caches results, so a shared instance serves stale rows and can leak one user's data to another.
+
+### Salesforce (Apex, LWC, Flow)
+
+In Apex, N+1 is a hard failure, not just a slowdown. Every SOQL query counts toward a per-transaction governor limit, and the query that crosses it throws `System.LimitException`, which cannot be caught and rolls back the transaction. Triggers, batch jobs, and data loads pass many records at once, so a query per record fails at ordinary volumes (numbers in [Governor Limits](../salesforce/platform.md#governor-limits)).
+
+```apex
+public with sharing class OpportunityCreditCheck {
+    // ❌ One query per Opportunity: in a synchronous transaction the 101st query throws LimitException
+    public static void validateSlow(List<Opportunity> opportunities) {
+        for (Opportunity opp : opportunities) {
+            Account acc = [SELECT Credit_Hold__c FROM Account WHERE Id = :opp.AccountId WITH USER_MODE];
+            if (acc.Credit_Hold__c) {
+                opp.addError('The account is on credit hold.');
+            }
+        }
+    }
+
+    // ✅ Collect the Ids, run one query, and look the parents up in a Map
+    public static void validate(List<Opportunity> opportunities) {
+        Set<Id> accountIds = new Set<Id>();
+        for (Opportunity opp : opportunities) {
+            accountIds.add(opp.AccountId);
+        }
+        Map<Id, Account> accountsById = new Map<Id, Account>(
+            [SELECT Id, Credit_Hold__c FROM Account WHERE Id IN :accountIds WITH USER_MODE]
+        );
+        for (Opportunity opp : opportunities) {
+            Account acc = accountsById.get(opp.AccountId);
+            if (acc != null && acc.Credit_Hold__c) {
+                opp.addError('The account is on credit hold.');
+            }
+        }
+    }
+
+    // ✅ Parent-to-child: a subquery returns each Account with its Contacts in one query
+    public static List<String> contactEmails(Set<Id> accountIds) {
+        List<String> emails = new List<String>();
+        for (Account acc : [
+            SELECT Id, (SELECT Email FROM Contacts WHERE Email != null)
+            FROM Account
+            WHERE Id IN :accountIds
+            WITH USER_MODE
+        ]) {
+            for (Contact con : acc.Contacts) {
+                emails.add(con.Email);
+            }
+        }
+        return emails;
+    }
+}
+```
+
+Static analysis: PMD `OperationWithLimitsInLoop`.
+
+The same shape appears in Lightning Web Components as round trips: one imperative Apex call per row means N server calls instead of one. A child component per row that calls Apex (imperatively or through its own `@wire`) hides the same problem; load the data once in the parent and pass it down.
+
+```javascript
+import { LightningElement, api, wire } from 'lwc';
+import getOpenTotal from '@salesforce/apex/InvoiceController.getOpenTotal';
+import getOpenTotals from '@salesforce/apex/InvoiceController.getOpenTotals';
+
+export default class AccountTotals extends LightningElement {
+    @api accountIds = [];
+
+    // ❌ One Apex call per row: N sequential server round trips
+    async loadTotalsOneByOne() {
+        const totals = {};
+        for (const accountId of this.accountIds) {
+            totals[accountId] = await getOpenTotal({ accountId });
+        }
+        return totals;
+    }
+
+    // ✅ One cacheable call for the whole list; the Apex method returns Map<Id, Decimal>
+    @wire(getOpenTotals, { accountIds: '$accountIds' })
+    totals;
+}
+```
+
+In Flow, the equivalent is a data element inside a Loop: every Get Records, Create/Update/Delete Records, or Apex action inside the loop runs once per iteration.
+
+```text
+❌ Loop over {!Opportunities}
+     → Get Records: Account where Id = {!Loop.AccountId}   (one query per iteration)
+     → Update Records: {!Loop}                             (one DML statement per iteration)
+
+✅ Get Records: the related Accounts, once, before the loop
+   Loop over {!Opportunities}
+     → Assignment: set the fields, add {!Loop} to {!OpportunitiesToUpdate}
+   Update Records: {!OpportunitiesToUpdate}                (one DML statement, after the loop)
+```
+
+> 📖 Depth: [Apex bulkification](../salesforce/apex.md#bulkification) · [Bulk-safe flow design](../salesforce/flows.md#bulk-safe-design) · [SOQL query shape](../salesforce/soql-sosl.md#query-shape) · [LWC data access](../salesforce/lwc.md#data-access)
+
 ---
 
 ## Review Checklist
 
-### 检测
-- [ ] 开启了 SQL 日志或查询计数监控
-- [ ] 测试中有查询数量断言
-- [ ] APM 工具配置了 N+1 告警
+### Detection
+- [ ] SQL logging or query-count monitoring is enabled
+- [ ] Tests assert the number of queries
+- [ ] The APM tool is configured to alert on N+1 patterns
 
-### 修复
-- [ ] ForeignKey / OneToOne 关系使用 JOIN eager loading
-- [ ] M2M / 反向关系使用 IN 批量预加载
-- [ ] 避免在循环中触发数据库查询
-- [ ] 使用投影只获取需要的字段
+### Fixes
+- [ ] To-one relationships use JOIN eager loading (`joinedload`, Prisma `include`)
+- [ ] To-many relationships use IN batch loading (`selectinload`, DataLoader)
+- [ ] No database queries are triggered inside loops
+- [ ] Projections fetch only the fields that are needed
+- [ ] Apex/Flow: no SOQL or data elements inside loops; related data loaded with one query into a Map
+- [ ] LWC: one Apex call loads the data for the whole list, not one call per row or per child component
 
-### 架构
-- [ ] 列表 API 分页，避免一次加载过多记录
-- [ ] GraphQL 场景使用 DataLoader
-- [ ] 缓存策略（Redis）处理高频读取的关联数据
+### Architecture
+- [ ] List APIs paginate, so one request never loads too many records
+- [ ] GraphQL resolvers use DataLoader, with new loader instances per request
+- [ ] A caching strategy (for example, Redis) serves frequently read related data

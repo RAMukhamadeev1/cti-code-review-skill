@@ -27,70 +27,64 @@ Quick-reference bug patterns organized by category. For detailed code examples, 
 - [ ] Incorrect error types thrown
 - [ ] Missing finally/cleanup blocks
 
-## TypeScript/JavaScript
+## JavaScript
 
-- [ ] `==` instead of `===`
-- [ ] Using `any` — prefer proper types or `unknown` with type guards
-- [ ] Missing `await` on async calls
-- [ ] Unhandled promise rejections (no try-catch around await)
-- [ ] `this` context lost in callbacks
-- [ ] Missing `key` prop in lists
-- [ ] Closure capturing stale loop variable
-- [ ] `parseInt` without radix parameter
-- [ ] Modifying array/object during iteration
+- [ ] `==` instead of `===` (`'' == 0` and `'0' == false` are both `true`)
+- [ ] `||` defaults where `0`, `''`, or `false` are valid values (`count || 10` turns `0` into `10`; use `??`)
+- [ ] Missing `await` or floating promises (errors surface later as unhandled rejections, or never)
+- [ ] `async` callbacks in `forEach` (not awaited) or `filter` (a Promise is always truthy); use `for...of` or `Promise.all(items.map(...))`
+- [ ] `fetch` assumed to reject on HTTP errors (it resolves on 4xx/5xx; check `response.ok`)
+- [ ] Methods passed as callbacks lose `this` (`setTimeout(this.save, 0)`; bind them or use an arrow function)
+- [ ] `var` in a loop captured by closures (every callback sees the last value; use `let`)
+- [ ] `parseInt` without a radix (`parseInt('0x1f')` is `31`; pass `10` or use `Number()`)
+- [ ] `sort()` on numbers without a comparator (`[10, 9, 1].sort()` gives `[1, 10, 9]`), or in-place `sort()`/`reverse()` on a shared array (use `toSorted()`/`toReversed()`)
+- [ ] Removing array elements while iterating (`splice` inside `forEach` or an index loop skips elements)
+- [ ] Binary floats for money (`0.1 + 0.2 !== 0.3`; use integer minor units or a decimal library)
+- [ ] `new Date('2024-01-02')` parses as UTC midnight while `new Date('2024-01-02T00:00')` is local time (off-by-one-day dates)
+- [ ] `JSON.parse` on external input without `try`/`catch` and shape validation
+- [ ] Deep merge or `obj[key] = value` with untrusted keys (`__proto__`, `constructor`, `prototype`) polluting `Object.prototype`
 
-**Full guide:** [TypeScript Review Guide](typescript.md)
+**Full guide:** [JavaScript Guide](javascript.md)
 
-## React / React 19
+## TypeScript
 
-- [ ] Hooks called conditionally or in loops (violates Rules of Hooks)
-- [ ] `useEffect` dependency array incomplete or incorrect
-- [ ] `useEffect` missing cleanup function (subscriptions, timers, fetches)
-- [ ] `useEffect` used for derived state (use `useMemo` instead)
-- [ ] `useMemo`/`useCallback` over-used or used without `React.memo`
-- [ ] Component defined inside another component (re-mounts every render)
-- [ ] Unstable props (inline objects/functions passed to memo components)
-- [ ] Direct mutation of props
-- [ ] List missing `key` or using array index as key (reorderable lists)
-- [ ] Server Component using client APIs (`useState`, `useEffect`, `onClick`)
-- [ ] `'use client'` on parent making entire subtree client-side
-- [ ] `useActionState` calling `setState` instead of returning new state
-- [ ] `useFormStatus` called in same component as `<form>` (must be in child)
-- [ ] `useOptimistic` used for critical operations (payments, deletions)
-- [ ] Single Suspense boundary for entire page (slow blocks fast)
-- [ ] Missing Error Boundary wrapping Suspense
-- [ ] `use()` Hook receiving a new Promise each render
+- [ ] `any` in signatures, casts, or `JSON.parse` results turns off checking (use `unknown` and narrow)
+- [ ] `as` assertions and non-null `!` hiding `undefined` or wrong shapes (validate or narrow instead)
+- [ ] `@ts-ignore` suppressing errors (use `@ts-expect-error` with a reason; it fails once the error is gone)
+- [ ] `strict` disabled, or `noUncheckedIndexedAccess` off so `arr[i]` and `record[key]` are typed as always present (it isn't part of `strict`)
+- [ ] `switch` over a union with no exhaustiveness check (`const unreachable: never = value` in `default`)
+- [ ] `paths` aliases the runtime or bundler doesn't resolve (`tsc` compiles, then the app fails with a module-not-found error)
 
-**TanStack Query v5:**
-- [ ] `queryKey` missing parameters that affect data
-- [ ] Default `staleTime: 0` causing excessive refetches
-- [ ] `useSuspenseQuery` with `enabled` option (not supported)
-- [ ] Mutation not invalidating related queries on success
-- [ ] Optimistic update missing rollback in `onError`
-- [ ] Using v4 array syntax (`useQuery(['key'], fn)`) instead of v5 object syntax
+**Full guide:** [TypeScript Guide](typescript.md)
 
-**Testing:**
-- [ ] Using `container.querySelector` instead of `screen.getByRole`
-- [ ] Using `fireEvent` instead of `userEvent`
-- [ ] Testing implementation details instead of user-visible behavior
-- [ ] Using `getBy*` for async content (use `findBy*`)
+## Node.js
 
-**Full guide:** [React Review Guide](react.md)
+- [ ] Synchronous I/O or CPU-heavy work in request handlers (`readFileSync`, `pbkdf2Sync`, large `JSON.parse`) blocking the event loop
+- [ ] Unhandled promise rejections (they crash the process by default since Node 15), or emitters and streams without an `'error'` listener (the error is thrown and the process exits)
+- [ ] `.pipe()` chains without error handling (errors aren't forwarded and streams aren't cleaned up; use `pipeline()` from `node:stream/promises`)
+- [ ] No `SIGTERM` handling (in-flight requests are dropped on deploy), or `process.exit()` in library code (set `process.exitCode`)
+- [ ] Two responses for one request (`ERR_HTTP_HEADERS_SENT`: a missing `return` after `res.send()` or `next()`)
+- [ ] Express 4 async handlers that don't pass errors to `next(err)` (Express 4 doesn't forward rejected promises; Express 5 does)
+- [ ] Path traversal: `path.join(baseDir, userInput)` without checking that the resolved path stays inside `baseDir`
+- [ ] Request bodies read without a size limit (hand-rolled parsers, or a `limit` raised far above the `express.json()` default)
+- [ ] Environment configuration used without validation at startup (`process.env` values are strings or `undefined`; fail fast)
+- [ ] Outbound HTTP calls without a timeout (pass `signal: AbortSignal.timeout(ms)` to `fetch`)
 
-## Vue 3
+**Full guide:** [Node.js Guide](nodejs.md)
 
-- [ ] Destructuring `reactive()` object loses reactivity (use `toRefs`)
-- [ ] Passing `props.x` to composable instead of `() => props.x` or `toRef(props, 'x')`
-- [ ] `watch` with async callback missing `onCleanup` (race condition)
-- [ ] `computed` with side effects (mutations, API calls)
-- [ ] `v-for` using index as `:key` when list can reorder
-- [ ] `v-if` and `v-for` on the same element
-- [ ] `defineProps` without TypeScript type declaration
-- [ ] `withDefaults` object default values not using factory functions
-- [ ] Directly mutating props instead of emitting events
-- [ ] `watchEffect` with unclear dependencies causing over-triggering
+## NestJS
 
-**Full guide:** [Vue 3 Review Guide](vue.md)
+- [ ] `@ValidateNested()` without `@Type(() => NestedDto)` (the nested object is never validated)
+- [ ] `ValidationPipe` without `whitelist: true` (unknown properties reach the service; add `forbidNonWhitelisted` to reject them)
+- [ ] `@Body() body: any` or an interface instead of a DTO class (nothing is validated; interfaces don't exist at runtime)
+- [ ] ORM client or repository injected straight into controllers (data access in the HTTP layer)
+- [ ] Business logic in guards or interceptors
+- [ ] `forwardRef()` hiding a circular dependency that a shared module or an extracted service should break
+- [ ] A request-scoped provider making every consumer request-scoped (scope bubbles up the injection chain: one instance per request)
+- [ ] `catch { return null }` hiding failures (callers can't tell "not found" from "failed"; throw an `HttpException` or let an exception filter map it)
+- [ ] E2E tests without the production global pipes, filters, and interceptors (`app.useGlobalPipes()` in `main.ts` isn't part of the testing module)
+
+**Full guide:** [NestJS Guide](nestjs.md)
 
 ## Python
 
@@ -104,168 +98,59 @@ Quick-reference bug patterns organized by category. For detailed code examples, 
 - [ ] Not closing files (use `with` statement)
 - [ ] Missing type annotations on public functions
 
-**Full guide:** [Python Review Guide](python.md)
+**Full guide:** [Python Guide](python.md)
 
-## Rust
+## Salesforce
 
-**Ownership & Borrowing:**
-- [ ] Unnecessary `clone()` to work around borrow checker
-- [ ] `Arc<Mutex<T>>` when single-owner would suffice
-- [ ] Storing borrows in structs when owned data is simpler
-- [ ] Unnecessary `RefCell` (runtime checks vs compile-time)
+**Apex:**
+- [ ] SOQL, DML, callouts, or `System.enqueueJob` inside loops (the transaction hits a governor limit at bulk volume)
+- [ ] Callout after uncommitted DML (`You have uncommitted work pending`), or setup and non-setup objects written in one transaction (`MIXED_DML_OPERATION`)
+- [ ] Empty `catch` blocks, or `Database.SaveResult` errors ignored after partial-success DML (`allOrNone` set to `false`)
+- [ ] String `==` assumed to be case-sensitive (it isn't; use `equals()`), while `Map` keys and `Set` elements of type String are case-sensitive
+- [ ] Hard-coded record Ids, org URLs, or usernames that break in every other org (PMD `AvoidHardcodingId`)
 
-**Unsafe Code:**
-- [ ] `unsafe` block without `SAFETY:` comment explaining invariants
-- [ ] `unsafe fn` without `# Safety` doc section
-- [ ] Unsafe invariants split across modules
+**Triggers:**
+- [ ] Only `Trigger.new[0]` processed, so every other record in the chunk is silently skipped
+- [ ] Static Boolean recursion guard that skips the records in later 200-record chunks of the same transaction
+- [ ] Logic that runs on every update instead of only when the relevant field changed (no `Trigger.oldMap` comparison)
+- [ ] Field assignments on `Trigger.new` in an after trigger (the records are read-only; set fields in a before trigger)
+- [ ] Logic in the trigger body, or a second trigger on the same object (the order between triggers isn't guaranteed)
 
-**Async & Concurrency:**
-- [ ] Blocking in async context (`std::fs`, `std::thread::sleep`)
-- [ ] Holding `std::sync::Mutex` across `.await`
-- [ ] Spawned task missing `'static` lifetime bound
-- [ ] Dropping a Future without awaiting (forgotten work)
+**SOQL/SOSL:**
+- [ ] Single-row assignment (`Account acc = [SELECT ...];`) that throws `QueryException` when no row or more than one row matches; query into a `List` and check it
+- [ ] Reading a field the query didn't select (`SObjectException: SObject row was retrieved via SOQL without querying the requested field`)
+- [ ] `WITH SECURITY_ENFORCED` in a class at API 67.0+ (it no longer compiles; use `WITH USER_MODE`)
+- [ ] Dynamic SOQL or SOSL that concatenates input instead of using binds or `Database.queryWithBinds` (injection)
+- [ ] Non-selective or unbounded queries on large objects (leading `%` wildcards, negative operators, no `WHERE` or `LIMIT`; PMD `AvoidNonRestrictiveQueries`)
 
-**Error Handling:**
-- [ ] `unwrap()`/`expect()` in production code
-- [ ] Library using `anyhow` instead of `thiserror` (callers can't match)
-- [ ] Swallowing error context (`map_err(|_| ...)`)
-- [ ] Ignoring `must_use` return values
+**LWC/Aura:**
+- [ ] `@AuraEnabled(cacheable=true)` method that performs DML (it fails at runtime; cacheable methods must be read-only)
+- [ ] `refreshApex` called with the unwrapped `data` instead of the whole value the `@wire` provisioned, or used for LDS record data (use `notifyRecordUpdateAvailable`)
+- [ ] Listeners, timers, or message-channel subscriptions set up in `connectedCallback` with no cleanup in `disconnectedCallback`
+- [ ] Mutating `@api` properties or wired data in place (they're read-only; copy before changing)
+- [ ] Aura server-action callbacks that ignore the `ERROR` and `INCOMPLETE` states, or async code that touches the component outside `$A.getCallback()`
 
-**Performance:**
-- [ ] Unnecessary `.collect()` — prefer lazy iterators
-- [ ] String concatenation in loops without `with_capacity`
-- [ ] `Box<dyn Trait>` when `impl Trait` would work
+**Visualforce:**
+- [ ] `escape="false"` on `apex:outputText` (or any component) with user-controlled data
+- [ ] Merge fields inside `<script>` or URLs without `JSENCODE`, `JSINHTMLENCODE`, or `URLENCODE` (for example `'{!$CurrentPage.parameters.q}'`)
+- [ ] DML in a controller constructor, a getter, or a `<apex:page action>` method (it runs on a GET page load with no CSRF token; PMD `ApexCSRF`, `VfCsrf`)
+- [ ] Large collections or query results kept in non-`transient` controller fields, bloating view state
 
-**Full guide:** [Rust Review Guide](rust.md)
+**Flows:**
+- [ ] Get Records, Create/Update/Delete Records, or Apex actions inside a Loop (they run once per iteration; collect, then act once after the loop)
+- [ ] Data and action elements without a fault path (the user sees a generic unhandled-fault error and the whole transaction fails)
+- [ ] Record-triggered flow without entry conditions, or one that runs on every update when it should run only when the record changes to meet the criteria
+- [ ] After-save flow updating its own triggering record (a second save that re-runs automation; use a before-save flow for same-record field updates)
+- [ ] Hard-coded record Ids, usernames, or queue names in flow elements (use Custom Metadata, Custom Labels, or lookups by DeveloperName)
 
-## Go
+**Metadata:**
+- [ ] New custom field without FLS in any permission set (users can't see it, and user-mode queries that reference it fail)
+- [ ] High-risk permissions (`ModifyAllData`, `ViewAllData`, `AuthorApex`, `CustomizeApplication`, `ManageUsers`) or object View All/Modify All granted without a justification
+- [ ] Profiles retrieved in full, so the diff carries unrelated permission changes and reordered elements that silently change access on deploy
+- [ ] Destructive changes, narrowed field types or lengths, or new required or unique fields on objects that already hold data
+- [ ] `<apiVersion>` bumped across 67.0 as if it were a no-op (user mode and implicit `with sharing` change query results and DML permissions)
 
-- [ ] Ignoring errors (`result, _ := SomeFunction()`)
-- [ ] Goroutine with no exit mechanism (leak)
-- [ ] Missing or incorrect `context.Context` propagation
-- [ ] Loop variable capture issue (Go < 1.22)
-- [ ] `defer` in loops (deferred until function, not loop iteration)
-- [ ] Variable shadowing
-- [ ] Map used before initialization
-- [ ] Error wrapping with `%v` instead of `%w` (breaks `errors.Is`/`errors.As`)
-
-**Full guide:** [Go Review Guide](go.md)
-
-## Java / Spring Boot
-
-- [ ] POJO/DTO with manual boilerplate instead of `record` *(Java 17+)*
-- [ ] Traditional switch missing `break` (use switch expressions) *(Java 14+)*
-- [ ] Field injection instead of constructor injection
-- [ ] JPA N+1 query (missing `fetch join` or `@EntityGraph`)
-- [ ] Incorrect `equals`/`hashCode` on JPA entities (avoid `@Data`; prefer stable business key or null-safe id — never all lazy fields)
-- [ ] `Optional.get()` without `isPresent()` check
-- [ ] Stream operations with side effects
-
-**Full guide:** [Java Review Guide](java.md) (17/21 + Boot 3)
-
-## Java 8 / Spring Boot 2 (Legacy)
-
-- [ ] Shared `SimpleDateFormat` / legacy `Date` instead of `java.time`
-- [ ] `Collectors.toMap` with null values or missing merge function
-- [ ] `Optional` used as field/parameter, or `isPresent()`+`get()` as null-check
-- [ ] `CompletableFuture.supplyAsync` I/O on `commonPool` (no explicit executor)
-- [ ] `RestTemplate` without connect/read timeouts
-- [ ] `@Transactional` on private method or same-class self-invocation
-- [ ] `parallelStream` with shared mutable state
-- [ ] Mixing `javax.*` and `jakarta.*` on Boot 2
-
-**Full guide:** [Java 8 Review Guide](java8.md)
-
-## PHP
-
-- [ ] Missing `declare(strict_types=1);` in new files
-- [ ] Weak comparison (`==`, `!=`) in auth, token, payment, or state logic
-- [ ] `in_array()` / `array_search()` used without strict mode
-- [ ] SQL built with string concatenation instead of prepared statements
-- [ ] User input echoed without context-aware escaping
-- [ ] Passwords stored with `md5()` / `sha1()` instead of `password_hash()`
-- [ ] Untrusted data passed to `unserialize()`
-- [ ] PHP 8.2+ dynamic properties used instead of declared properties
-- [ ] Errors hidden with `@` or swallowed in empty `catch` blocks
-- [ ] File uploads using client-provided names or missing MIME/size validation
-
-**Full guide:** [PHP Review Guide](php.md)
-
-## Ruby / Rails
-
-- [ ] Condition assumes `0`, `""`, or `[]` is falsey
-- [ ] Mutable Hash/Array default shared across entries (`Hash.new([])`, `Array.new(3, [])`)
-- [ ] Bang method return value treated as the transformed object
-- [ ] Bare or broad `rescue` hides unrelated failures or exposes `error.message`
-- [ ] Dynamic `send`, `constantize`, `eval`, or SQL fragment controlled by user input
-- [ ] Untrusted data passed to `Marshal.load`, unsafe YAML loading, or an interpolated shell command
-- [ ] Strong parameters use `permit!`, `to_unsafe_h`, or an empty hash allowlist
-- [ ] Nested `params.expect` arrays use a flat shape instead of the required `[[...]]` form
-- [ ] Active Record query interpolates values or dynamic identifiers into SQL
-- [ ] `Model.find(params[:id])` loads a record before ownership or policy scoping (IDOR)
-- [ ] `redirect_to` accepts a user-controlled URL with `allow_other_host: true` (open redirect)
-- [ ] Browser-authenticated state changes skip CSRF protection or use unsafe session cookie flags
-- [ ] Association access in a loop causes N+1 queries
-- [ ] Model validation lacks a matching database constraint for a critical invariant
-- [ ] `update_all` / `delete_all` unexpectedly skips callbacks and validations
-- [ ] Bulk writes can drift a `counter_cache` without reconciliation
-- [ ] Active Job retry can duplicate a payment, email, or other external side effect
-- [ ] GlobalID job argument can be deleted before deserialization
-- [ ] Transaction contains external side effects that cannot roll back
-- [ ] Retried create/payment request can duplicate committed work without an idempotency key
-
-**Full guide:** [Ruby and Rails Review Guide](ruby.md)
-
-## Swift
-
-- [ ] Force-unwrap (`!`) or `try!` where safe unwrapping is possible
-- [ ] Closure capturing `self` strongly without `[weak self]` (retain cycle)
-- [ ] Reference type (`class`) used where a value type (`struct`) is intended
-- [ ] Errors swallowed instead of propagated via `throws` / `Result`
-- [ ] Data race across concurrency boundaries (missing `Sendable`, `@MainActor`, actor isolation)
-- [ ] Fire-and-forget `Task {}` that is never cancelled or leaks
-- [ ] `@ObservedObject` used where `@StateObject` is required for ownership
-- [ ] Implicitly unwrapped optional (`var x: T!`) outside IBOutlets
-- [ ] Over-broad access control (`public` / `open` where `internal` suffices)
-
-**Full guide:** [Swift Review Guide](swift.md)
-
-## Dart / Flutter
-
-- [ ] Missing `const` on static widget subtrees, or `_buildFoo()` helpers instead of extracted widgets
-- [ ] `!` / `as` / unconstrained `late` used to silence null safety
-- [ ] Heavy `jsonDecode` / image / crypto work on the UI isolate
-- [ ] `Future` or `Stream` created inside `build` (new instance every rebuild)
-- [ ] `setState` / `BuildContext` used after `await` without `mounted` / `context.mounted`
-- [ ] `ref.watch` / `context.watch` in a callback; `read` used in `build` (or the reverse)
-- [ ] `BlocProvider.value` / `ChangeNotifierProvider.value` given a new instance constructed in `build` (use `create`; `value` does not dispose)
-- [ ] `BlocProvider(create: ...)` captures a stale `id` — missing `ValueKey(id)` remount or `didUpdateWidget` reload (`UniqueKey()` remounts every rebuild)
-- [ ] Platform channel `invokeMethod` without `PlatformException` handling
-- [ ] List children holding `State` missing a stable `ValueKey` (or using `UniqueKey()` in `build`)
-- [ ] `TextEditingController` / `AnimationController` / `StreamSubscription` not disposed
-
-**Full guide:** [Dart / Flutter Review Guide](dart.md)
-
-## C
-
-- [ ] Pointer/buffer overflow or underflow
-- [ ] Undefined behavior (use-after-free, double-free, null deref)
-- [ ] Missing error handling after allocation (`malloc` can return `NULL`)
-- [ ] Integer overflow in size calculations
-- [ ] Resource leaks (missing `free`, `fclose`, etc.)
-- [ ] Missing `static` on file-local functions/variables
-
-**Full guide:** [C Review Guide](c.md)
-
-## C++
-
-- [ ] Missing RAII wrapper for resources
-- [ ] Violating Rule of 0/3/5 (destructor, copy, move)
-- [ ] Exception safety issues (no `noexcept` where applicable)
-- [ ] Dangling references from returned iterators or references
-- [ ] Unnecessary copies (missing `std::move` or pass-by-reference)
-
-**Full guide:** [C++ Review Guide](cpp.md)
+**Full guides:** [Platform](salesforce/platform.md) · [Apex](salesforce/apex.md) · [Triggers](salesforce/apex-triggers.md) · [SOQL/SOSL](salesforce/soql-sosl.md) · [LWC](salesforce/lwc.md) · [Aura](salesforce/aura.md) · [Visualforce](salesforce/visualforce.md) · [Flows](salesforce/flows.md) · [Metadata](salesforce/metadata.md)
 
 ## SQL
 
@@ -280,7 +165,7 @@ Quick-reference bug patterns organized by category. For detailed code examples, 
 - [ ] Collation / case sensitivity surprises across databases (MySQL vs Postgres defaults)
 - [ ] Date and timezone handling errors (naive timestamps, server-local `NOW()`, DST)
 
-**See also:** [Security Review Guide](security-review-guide.md) for SQL injection prevention
+**See also:** [Security Review Guide](security-review-guide.md) for SQL injection prevention, and the [SQL Injection Prevention Guide](cross-cutting/sql-injection-prevention.md) for cross-language examples
 
 ## API Design
 

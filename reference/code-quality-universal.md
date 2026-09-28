@@ -1,42 +1,43 @@
 # Universal Code Quality Anti-Patterns
 
-> 语言无关的代码质量反模式指南，覆盖代码复用、抽象泄漏、参数膨胀、嵌套条件、字符串类型化、TOCTOU、空操作更新等核心主题。适用于所有语言的 PR 审查。
+> A language-agnostic guide to code-quality anti-patterns, covering core topics such as code reuse, leaky abstractions, parameter sprawl, nested conditionals, stringly-typed code, TOCTOU, and no-op updates. It applies to PR reviews in every language; [Salesforce Mapping](#salesforce-mapping) shows the Salesforce form of each anti-pattern.
 
-## 目录
+## Table of Contents
 
-- [代码复用审查](#代码复用审查)
-- [参数膨胀](#参数膨胀)
-- [抽象泄漏](#抽象泄漏)
-- [字符串类型化](#字符串类型化)
-- [嵌套条件表达式](#嵌套条件表达式)
-- [复制粘贴变种](#复制粘贴变种)
-- [空操作更新](#空操作更新)
-- [TOCTOU 竞争条件](#toctou-竞争条件)
-- [过度宽泛操作](#过度宽泛操作)
-- [冗余状态](#冗余状态)
-- [通用质量审查清单](#通用质量审查清单)
+- [Code Reuse Review](#code-reuse-review)
+- [Parameter Sprawl](#parameter-sprawl)
+- [Leaky Abstractions](#leaky-abstractions)
+- [Stringly-Typed Code](#stringly-typed-code)
+- [Nested Conditionals](#nested-conditionals)
+- [Copy-Paste Variants](#copy-paste-variants)
+- [No-Op Updates](#no-op-updates)
+- [TOCTOU Race Conditions](#toctou-race-conditions)
+- [Overly Broad Operations](#overly-broad-operations)
+- [Redundant State](#redundant-state)
+- [Salesforce Mapping](#salesforce-mapping)
+- [Universal Quality Checklist](#universal-quality-checklist)
 
 ---
 
-## 代码复用审查
+## Code Reuse Review
 
 Before accepting new code, search the existing codebase for reusable utilities.
 
-### 搜索现有工具函数
+### Search for existing utilities
 
 ```python
-# ❌ 新写的路径拼接逻辑——项目中已有 PathBuilder
+# ❌ Newly written path-joining logic - the project already has PathBuilder
 def get_config_path(name):
     base = os.environ.get("APP_ROOT", ".")
     return os.path.join(base, "config", name + ".json")
 
-# ✅ 使用已有的 PathBuilder
+# ✅ Use the existing PathBuilder
 def get_config_path(name):
     return PathBuilder.config(f"{name}.json")
 ```
 
 ```javascript
-// ❌ 手写 debounce——项目已有 lodash 或 utils/debounce.ts
+// ❌ Hand-written debounce - the project already has lodash or utils/debounce.ts
 function debounce(fn, ms) {
   let timer;
   return (...args) => {
@@ -45,27 +46,27 @@ function debounce(fn, ms) {
   };
 }
 
-// ✅ 使用已有的工具函数
+// ✅ Use the existing utility
 import { debounce } from "@/utils/debounce";
 ```
 
-**审查要点：**
-- 新增函数是否与已有 utility 重名或功能重叠？
-- inline 逻辑是否可以提取为已有模块的调用？
-- 检查相邻文件和 shared/utils 目录
+**Review points:**
+- Does a new function duplicate the name or the functionality of an existing utility?
+- Can inline logic be replaced with a call to an existing module?
+- Check adjacent files and the shared/utils directories
 
 ---
 
-## 参数膨胀
+## Parameter Sprawl
 
-### 函数参数不断增长
+### Function parameters keep growing
 
 ```python
-# ❌ 每次新需求加一个参数
+# ❌ One more parameter for every new requirement
 def create_user(name, email, role, team, active, avatar_url, timezone):
     ...
 
-# ✅ 使用配置对象 / dataclass
+# ✅ Use a parameter object / dataclass
 @dataclass
 class CreateUserParams:
     name: str
@@ -81,7 +82,7 @@ def create_user(params: CreateUserParams) -> User:
 ```
 
 ```typescript
-// ❌ 6+ 个 positional 参数
+// ❌ 6+ positional parameters
 function renderWidget(
   title: string, width: number, height: number,
   theme: string, collapsible: boolean, icon: string
@@ -99,59 +100,60 @@ interface WidgetOptions {
 function renderWidget(options: WidgetOptions) { ... }
 ```
 
-**审查要点：**
-- 函数参数是否 ≥ 4 个？考虑 options object / dataclass
-- 新参数是否只是布尔标志？考虑 enum 或 strategy pattern
-- 是否有 `enable_x`, `disable_y` 这类互斥参数？
+**Review points:**
+- Does the function take ≥ 4 parameters? Consider an options object / dataclass
+- Is the new parameter just a boolean flag? Consider an enum or the strategy pattern
+- Are there mutually exclusive parameters such as `enable_x` and `disable_y`?
 
 ---
 
-## 抽象泄漏
+## Leaky Abstractions
 
-### 暴露内部实现细节
+### Exposing internal implementation details
 
 ```python
-# ❌ 返回内部 ORM 对象——调用者被迫了解 SQLAlchemy
+# ❌ Returns internal ORM objects - callers are forced to know SQLAlchemy
 def get_users():
     return session.query(User).filter(User.active == True).all()
 
-# ✅ 返回 domain 对象，隐藏持久化层
+# ✅ Return domain objects and hide the persistence layer
 def get_active_users() -> list[UserDTO]:
     rows = user_repo.find_active()
     return [UserDTO.from_row(r) for r in rows]
 ```
 
 ```typescript
-// ❌ 组件接收 API response 原始结构
-<UserCard user={apiResponse.data.results[0]} />
+// ❌ The render function receives the raw API response structure
+renderUserCard(apiResponse.data.results[0]);
 
-// ✅ 组件接收 domain 类型，adapter 处理映射
+// ✅ The render function receives a domain type; an adapter handles the mapping
 interface UserSummary {
   displayName: string;
   avatarUrl: string;
 }
-<UserCard user={adaptUser(apiResponse)} />
+function renderUserCard(user: UserSummary): void { /* ... */ }
+renderUserCard(adaptUser(apiResponse));
 ```
 
-**审查要点：**
-- 函数返回类型是否泄露底层实现（ORM, HTTP client, file format）？
-- 组件/函数是否依赖外部系统的数据结构？
-- 是否破坏了已有的抽象边界？
+**Review points:**
+- Does the function's return type leak the underlying implementation (ORM, HTTP client, file format)?
+- Does a component/function depend on an external system's data structures?
+- Does the change break an existing abstraction boundary?
 
 ---
 
-## 字符串类型化
+## Stringly-Typed Code
 
-### 用原始字符串代替常量/枚举
+### Raw strings instead of constants/enums
 
 ```python
-# ❌ Magic strings 散落各处
+# ❌ Magic strings scattered everywhere
 if status == "active":
     ...
 if role == "admin":
     ...
 
-# ✅ 使用 enum
+# ✅ Use an enum
 class Status(StrEnum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
@@ -162,11 +164,11 @@ if user.status == Status.ACTIVE:
 ```
 
 ```typescript
-// ❌ Raw string event names——拼写错误不会报错
+// ❌ Raw string event names - a typo raises no error
 emitter.emit("userCreated", data);
 emitter.on("usercreated", handler); // bug: typo
 
-// ✅ 常量或 branded type
+// ✅ Constants or a branded type
 const Events = {
   USER_CREATED: "userCreated",
   USER_SUSPENDED: "userSuspended",
@@ -174,19 +176,19 @@ const Events = {
 emitter.emit(Events.USER_CREATED, data);
 ```
 
-**审查要点：**
-- 是否用字符串代替了已有的 enum/union type？
-- 事件名、action type、status 值是否散落在多个文件？
-- 字符串比较是否 case-sensitive 但未验证？
+**Review points:**
+- Is a raw string used where an enum/union type already exists?
+- Are event names, action types, and status values scattered across several files?
+- Are string comparisons case-sensitive without the input being validated?
 
 ---
 
-## 嵌套条件表达式
+## Nested Conditionals
 
-### 三元链和嵌套 if/else
+### Ternary chains and nested if/else
 
 ```python
-# ❌ 三元链难以阅读
+# ❌ Ternary chains are hard to read
 label = (
     "Admin" if role == "admin" else
     "Manager" if role == "manager" else
@@ -194,7 +196,7 @@ label = (
     "Unknown"
 )
 
-# ✅ 查找表或 match
+# ✅ Lookup table or match
 ROLE_LABELS = {
     "admin": "Admin",
     "manager": "Manager",
@@ -204,12 +206,12 @@ label = ROLE_LABELS.get(role, "Unknown")
 ```
 
 ```typescript
-// ❌ 嵌套三元
+// ❌ Nested ternary
 const bg = isHovered
   ? isSelected ? "blue" : "gray"
   : isSelected ? "navy" : "white";
 
-// ✅ 查找表（lookup map）
+// ✅ Lookup table (lookup map)
 const bgMap: Record<string, string> = {
   "true-true": "blue",
   "true-false": "gray",
@@ -220,7 +222,7 @@ const bg = bgMap[`${isHovered}-${isSelected}`];
 ```
 
 ```python
-# ❌ 嵌套 if 3+ 层
+# ❌ if statements nested 3+ levels deep
 def process(order):
     if order is not None:
         if order.items:
@@ -238,32 +240,32 @@ def process(order):
         ...
 ```
 
-**审查要点：**
-- 三元表达式是否嵌套 ≥ 2 层？
-- if/else 嵌套是否 ≥ 3 层？
-- 能否用 lookup table、early return 或 match 替换？
+**Review points:**
+- Are ternaries nested 2 or more levels deep?
+- Is if/else nested 3 or more levels deep?
+- Can a lookup table, an early return, or match replace it?
 
 ---
 
-## 复制粘贴变种
+## Copy-Paste Variants
 
-### 近乎重复的代码块
+### Near-duplicate code blocks
 
 ```python
-# ❌ 两个函数几乎一样，只有字段名不同
+# ❌ Two functions that are almost identical, except for the field names
 def format_user(user):
     return f"{user.first_name} {user.last_name} ({user.email})"
 
 def format_employee(emp):
     return f"{emp.first_name} {emp.last_name} ({emp.work_email})"
 
-# ✅ 统一抽象
+# ✅ One shared abstraction
 def format_person(first: str, last: str, email: str) -> str:
     return f"{first} {last} ({email})"
 ```
 
 ```typescript
-// ❌ Copy-paste handler 只改了 URL
+// ❌ Copy-pasted handler with only the URL changed
 async function deletePost(id: string) {
   await fetch(`/api/posts/${id}`, { method: "DELETE" });
   router.push("/posts");
@@ -273,53 +275,58 @@ async function deleteComment(id: string) {
   router.push("/comments");
 }
 
-// ✅ 参数化
+// ✅ Parameterize
 async function deleteResource(resource: string, id: string) {
   await fetch(`/api/${resource}/${id}`, { method: "DELETE" });
   router.push(`/${resource}`);
 }
 ```
 
-**审查要点：**
-- 是否有 ≥ 2 段代码仅变量名/URL/字符串不同？
-- 能否提取参数化的共享函数？
-- 是否可以用 template method 或 strategy 消除变种？
+**Review points:**
+- Are there ≥ 2 blocks of code that differ only in variable names/URLs/strings?
+- Can a parameterized shared function be extracted?
+- Can a template method or strategy remove the variants?
 
 ---
 
-## 空操作更新
+## No-Op Updates
 
-### 无条件触发状态更新
+### State updates triggered unconditionally
 
 ```typescript
-// ❌ 每次 poll 都触发 update——即使数据未变
-useEffect(() => {
+// ❌ Every poll notifies the subscriber - even when the data has not changed
+function startStatusPolling(onChange: (status: Status) => void): () => void {
   const interval = setInterval(() => {
-    fetch("/api/status").then(r => r.json()).then(setStatus);
+    fetch("/api/status").then(r => r.json()).then(onChange);
   }, 5000);
   return () => clearInterval(interval);
-}, []);
+}
 
-// ✅ 仅在值变化时更新
-useEffect(() => {
+// ✅ Notify only when the value changes
+function startStatusPolling(onChange: (status: Status) => void): () => void {
+  let last: Status | undefined;
   const interval = setInterval(() => {
     fetch("/api/status")
       .then(r => r.json())
-      .then(data => {
-        setStatus(prev => isEqual(prev, data) ? prev : data);
-      });
+      .then((next: Status) => {
+        if (!isEqual(last, next)) {
+          last = next;
+          onChange(next);
+        }
+      })
+      .catch(handleError);
   }, 5000);
   return () => clearInterval(interval);
-}, []);
+}
 ```
 
 ```python
-# ❌ 每次 loop 都写 DB——即使值未变
+# ❌ Writes to the DB on every loop iteration - even when the value has not changed
 for item in items:
     item.status = compute_status(item)
     session.commit()
 
-# ✅ 仅在变化时写入
+# ✅ Write only when the value changes
 for item in items:
     new_status = compute_status(item)
     if item.status != new_status:
@@ -327,24 +334,24 @@ for item in items:
         session.commit()
 ```
 
-**审查要点：**
-- polling / interval / event handler 是否无条件更新？
-- wrapper function 是否尊重 same-reference return？
-- DB 写入是否检查了实际变化？
+**Review points:**
+- Do polling / interval / event handlers update unconditionally?
+- Do wrapper functions preserve same-reference returns (hand back the previous value when nothing changed)?
+- Do DB writes check that something actually changed?
 
 ---
 
-## TOCTOU 竞争条件
+## TOCTOU Race Conditions
 
 ### Time-of-Check-to-Time-of-Use
 
 ```python
-# ❌ 先检查后操作——中间文件可能被删除/创建
+# ❌ Check first, then act - the file may be deleted or created in between
 if os.path.exists(path):
     with open(path) as f:
         data = f.read()
 
-# ✅ 直接操作 + 处理异常
+# ✅ Act directly + handle the exception
 try:
     with open(path) as f:
         data = f.read()
@@ -353,11 +360,11 @@ except FileNotFoundError:
 ```
 
 ```python
-# ❌ 检查余额 → 扣款 两步操作不是原子的
+# ❌ Check the balance, then debit: two steps that are not atomic
 if account.balance >= amount:
     account.balance -= amount
 
-# ✅ 原子操作或锁
+# ✅ An atomic operation or a lock
 with account.lock:
     if account.balance < amount:
         raise InsufficientFundsError()
@@ -365,12 +372,12 @@ with account.lock:
 ```
 
 ```typescript
-// ❌ Check-then-act 在 async 环境中不安全
+// ❌ Check-then-act is unsafe in async code
 if (!fileExists(path)) {
   await writeFile(path, content);
 }
 
-// ✅ 直接操作 + catch
+// ✅ Act directly + catch
 try {
   await writeFile(path, content, { flag: "wx" });
 } catch (e) {
@@ -379,67 +386,66 @@ try {
 }
 ```
 
-**审查要点：**
-- `if exists → operate` 模式是否可替换为 `try operate → catch`？
-- 多步状态变更是否在事务/锁内？
-- async 操作中 check 和 act 之间是否有 await？
+**Review points:**
+- Can an `if exists → operate` pattern be replaced with `try operate → catch`?
+- Are multi-step state changes inside a transaction/lock?
+- In async code, is there an await between the check and the act?
 
 ---
 
-## 过度宽泛操作
+## Overly Broad Operations
 
-### 读取过多数据
+### Reading too much data
 
 ```python
-# ❌ 读取整个文件再取第一行
+# ❌ Read the entire file to get the first line
 content = Path("log.txt").read_text()
 first_line = content.split("\n")[0]
 
-# ✅ 只读第一行，不加载整个文件
+# ✅ Read only the first line, without loading the whole file
 with open("log.txt") as f:
     first_line = f.readline()
 ```
 
 ```typescript
-// ❌ 加载所有 items 再过滤
+// ❌ Load every item, then filter
 const allItems = await db.query("SELECT * FROM orders");
 const pending = allItems.filter(o => o.status === "pending");
 
-// ✅ 数据库层过滤
+// ✅ Filter in the database
 const pending = await db.query(
   "SELECT * FROM orders WHERE status = ?", ["pending"]
 );
 ```
 
 ```python
-# ❌ 读取整个列表找一条记录
-users = list(User.objects.all())
-user = next(u for u in users if u.id == user_id)
+# ❌ Load the whole table to find one record
+user = next(u for u in session.scalars(select(User)).all() if u.id == user_id)
 
-# ✅ 精确查询
-user = User.objects.get(id=user_id)
+# ✅ Precise lookup by primary key
+user = session.get(User, user_id)
 ```
 
-**审查要点：**
-- 是否读取了整个集合/文件再只用一小部分？
-- 能否将过滤推到数据库/存储层？
-- API 调用是否支持 pagination/limit 参数？
+**Review points:**
+- Does the code read an entire collection/file and then use only a small part of it?
+- Can filtering be pushed down to the database/storage layer?
+- Do API calls support pagination/limit parameters?
 
 ---
 
-## 冗余状态
+## Redundant State
 
-### 状态可以被推导
+### State that can be derived
 
 ```typescript
-// ❌ 同时存储 fullName 和 firstName + lastName
+// ❌ Stores fullName alongside firstName + lastName
 interface User {
   firstName: string;
   lastName: string;
   fullName: string;  // redundant
 }
 
-// ✅ fullName 是推导值
+// ✅ fullName is a derived value
 interface User {
   firstName: string;
   lastName: string;
@@ -448,13 +454,13 @@ const fullName = `${user.firstName} ${user.lastName}`;
 ```
 
 ```python
-# ❌ 缓存值在源数据变化时可能过时
+# ❌ Cached values can go stale when the source data changes
 class Order:
     total: float
     item_count: int       # redundant if len(items) gives the same
     items: list[Item]
 
-# ✅ 推导或 property
+# ✅ Derive it, or use a property
 class Order:
     items: list[Item]
 
@@ -467,22 +473,40 @@ class Order:
         return len(self.items)
 ```
 
-**审查要点：**
-- 是否有字段可以从其他字段推导？
-- 缓存值是否有 invalidation 机制？
-- observer/effect 是否可以替换为直接调用？
+**Review points:**
+- Can any field be derived from other fields?
+- Do cached values have an invalidation mechanism?
+- Can an observer/effect be replaced with a direct call?
 
 ---
 
-## 通用质量审查清单
+## Salesforce Mapping
 
-- [ ] **复用审查**: 搜索了现有 utility/helper，没有重复造轮子？
-- [ ] **参数数量**: 函数参数 ≤ 3 个？超过则用 options object / dataclass？
-- [ ] **抽象边界**: 返回类型没有暴露内部实现细节（ORM、HTTP client、file format）？
-- [ ] **类型安全**: 没有 magic strings 代替已有的 enum/constant/union type？
-- [ ] **条件深度**: 三元嵌套 ≤ 1 层？if/else 嵌套 ≤ 2 层？
-- [ ] **DRY**: 没有 copy-paste-with-variation（≥ 2 段近似代码）？
-- [ ] **空操作防护**: polling / interval / event handler 有 change-detection guard？
-- [ ] **TOCTOU**: `if exists → operate` 替换为 `try operate → catch`？
-- [ ] **数据精度**: 没有读取整个集合/文件只为了取子集？
-- [ ] **冗余状态**: 没有可以从其他字段推导的存储字段？
+The same anti-patterns in Salesforce code and metadata. The linked guides hold the rules and examples.
+
+| Anti-pattern | Salesforce form | Guide |
+|---|---|---|
+| Code reuse | A new test-data helper, trigger dispatcher, query, logger, or LWC error parser written next to the existing `TestDataFactory`, trigger handler framework, selectors, logger, or `reduceErrors` | [Apex: Class Design](salesforce/apex.md#class-design) |
+| Parameter sprawl | `@AuraEnabled` methods that take a growing list of primitives, or invocable methods that pack values into delimited strings, instead of one request class (with `@InvocableVariable` fields for Flow) | [Flows: Invocable Apex Contract](salesforce/flows.md#invocable-apex-contract) |
+| Leaky abstractions | Controllers that return raw sObjects with every queried field, `Database.SaveResult`, or raw exception text to LWC instead of a response DTO and a user-safe error | [LWC: The LWC-Apex Contract](salesforce/lwc.md#the-lwc-apex-contract) |
+| Stringly-typed code | `record.get('Field__c')` and field names in strings instead of `Schema.SObjectField` tokens in Apex or `@salesforce/schema` imports in LWC | [Apex: Language Pitfalls](salesforce/apex.md#language-pitfalls) · [LWC: Data Access](salesforce/lwc.md#data-access) |
+| No-op updates | DML on records whose values did not change, which still fires triggers, flows, and validation rules and uses up limits | [Apex: Bulkification](salesforce/apex.md#bulkification) |
+| TOCTOU race conditions | Query-then-update without `FOR UPDATE`, so two concurrent transactions (for example, two Queueable jobs) overwrite each other's changes | [Apex: Async Apex](salesforce/apex.md#async-apex) |
+| Overly broad operations | `FIELDS(STANDARD)` in Apex or `FIELDS(ALL)` in API queries when the code reads a few fields; queries with no selective filter on large objects; flow Get Records elements that store all fields | [SOQL & SOSL: Selectivity & Large Data Volumes](salesforce/soql-sosl.md#selectivity--large-data-volumes) |
+| Redundant state | Trigger-maintained copies of values that a formula or roll-up summary field could derive | [Metadata: Objects & Fields](salesforce/metadata.md#objects--fields) |
+
+---
+
+## Universal Quality Checklist
+
+- [ ] **Reuse review**: existing utilities/helpers were searched for; nothing is reinvented?
+- [ ] **Parameter count**: functions take ≤ 3 parameters? If more, is an options object / dataclass used?
+- [ ] **Abstraction boundaries**: return types do not expose internal implementation details (ORM, HTTP client, file format)?
+- [ ] **Type safety**: no magic strings in place of an existing enum/constant/union type?
+- [ ] **Condition depth**: ternaries nested ≤ 1 level? if/else nested ≤ 2 levels?
+- [ ] **DRY**: no copy-paste-with-variation (≥ 2 near-identical blocks)?
+- [ ] **No-op guards**: polling / interval / event handlers have a change-detection guard?
+- [ ] **TOCTOU**: `if exists → operate` replaced with `try operate → catch`?
+- [ ] **Data precision**: no reading an entire collection/file just to use a subset?
+- [ ] **Redundant state**: no stored fields that can be derived from other fields?
+- [ ] **Salesforce**: each anti-pattern above also checked in its Salesforce form ([Salesforce Mapping](#salesforce-mapping))?

@@ -1,129 +1,134 @@
-# 错误处理原则 — 跨语言通用指南
+# Error Handling Principles: Cross-Language Guide
 
-> 本文档覆盖错误处理的核心原则、常见反模式、错误层次设计和日志最佳实践。每个原则附带跨语言代码示例。
+> This guide covers the core principles of error handling, common anti-patterns, error hierarchy design, and logging best practices. Each principle comes with code examples for JavaScript/TypeScript, Python, and Salesforce Apex.
 
-## 目录
+## Table of Contents
 
-- [核心原则](#核心原则)
-- [反模式](#反模式)
-- [错误层次设计](#错误层次设计)
-- [日志最佳实践](#日志最佳实践)
-- [跨语言代码示例](#跨语言代码示例)
+- [Core Principles](#core-principles)
+- [Anti-Patterns](#anti-patterns)
+- [Error Hierarchy Design](#error-hierarchy-design)
+- [Logging Best Practices](#logging-best-practices)
+- [Code Examples by Language](#code-examples-by-language)
 - [Review Checklist](#review-checklist)
 
 ---
 
-## 核心原则
+## Core Principles
 
-### 原则 1: 不要吞掉错误
+### Principle 1: Don't swallow errors
 
-每个错误都必须被处理：向上传播、记录日志、或转换为更有意义的错误。**永远不要**静默忽略。
+Every error must be handled: propagated upward, logged, or converted into a more meaningful error. **Never** ignore it silently.
 
 ```
-// 伪代码
+// Pseudocode
 result = risky_operation()
 if error:
-    // 必须做以下之一：
-    //   1. return error to caller（传播）
-    //   2. log + return fallback（降级）
-    //   3. panic/crash（不可恢复时）
+    // You must do one of the following:
+    //   1. return error to caller (propagate)
+    //   2. log + return fallback (degrade)
+    //   3. panic/crash (when unrecoverable)
 ```
 
-### 原则 2: 添加上下文
+### Principle 2: Add context
 
-错误信息应包含**操作描述**和**关键参数**，使调试者无需阅读调用链即可定位问题。
+Error messages should include **the operation** and **the key parameters**, so whoever debugs the problem can locate it without reading the whole call chain.
 
 ```
-// ❌ 无上下文
+// ❌ No context
 "failed"
 
-// ✅ 有上下文
+// ✅ With context
 "failed to process order #12345: payment gateway timeout after 30s"
 ```
 
-### 原则 3: 使用特定类型
+### Principle 3: Use specific types
 
-用错误类型区分失败原因，让调用者能精确处理不同的失败场景。
+Use error types to tell failure causes apart, so callers can handle each failure precisely.
 
 ```
-// ❌ 通用错误
+// ❌ Generic error
 throw new Error("something went wrong")
 
-// ✅ 特定类型
+// ✅ Specific types
 throw new OrderNotFoundError(orderId)
 throw new PaymentTimeoutException(gatewayName, timeoutMs)
 ```
 
-### 原则 4: Fail Fast
+### Principle 4: Fail fast
 
-在操作开始前验证前置条件，尽早失败。这避免了部分执行后才发现错误导致的不一致状态。
+Validate preconditions before the operation starts and fail as early as possible. This avoids the inconsistent state left behind when an error surfaces halfway through.
 
 ```
-// ❌ 执行到一半才发现参数无效
+// ❌ Finds the invalid argument halfway through
 def process(data, config):
-    result = expensive_computation(data)  # 已花费 5 秒
+    result = expensive_computation(data)  # already spent 5 seconds
     if not config.valid:
-        raise ValueError("invalid config")  # 5 秒白费了
+        raise ValueError("invalid config")  # 5 seconds wasted
 
-// ✅ 先验证
+// ✅ Validate first
 def process(data, config):
     if not config.valid:
         raise ValueError("invalid config")
     result = expensive_computation(data)
 ```
 
-### 原则 5: 错误处理只做一次
+### Principle 5: Handle each error once
 
-不要在每个层级都处理同一个错误（既 log 又 return 又 wrap）。选择一种方式，让调用者决定如何处理。
+Don't handle the same error at every layer (logging it, returning it, and wrapping it). Pick one, and let the caller decide what to do with it.
 
 ```
-// ❌ 既 log 又 return（重复处理）
+// ❌ Logs and returns (handled twice)
 if err:
     log.error("failed: %s", err)
     return err
 
-// ✅ 只包装并返回，让顶层统一处理
+// ✅ Only wrap and return; the top level handles it in one place
 if err:
     return wrap_error("operation failed", err)
 ```
 
 ---
 
-## 反模式
+## Anti-Patterns
 
-### 反模式 1: 空 catch 块
+### Anti-pattern 1: Empty catch blocks
 
 ```python
-# ❌ Python: 空 except 吞掉所有异常（包括 KeyboardInterrupt）
+# ❌ Python: a bare except swallows every exception (including KeyboardInterrupt)
 try:
     result = risky()
 except:
     pass
-
-# ❌ Java: 空 catch 吞掉异常
-try {
-    result = risky();
-} catch (Exception e) {
-    // 什么都不做
-}
-
-# ❌ Go: 忽略 error
-result, _ := risky()
-
-# ❌ Rust: unwrap() 在生产代码中
-let result = risky().unwrap();  // panic on error
 ```
 
-### 反模式 2: 过宽的 catch
+```typescript
+// ❌ TypeScript: an empty catch hides the failure
+try {
+    await saveOrder(order);
+} catch {}
+
+// ❌ A promise chain that throws the rejection away
+saveOrder(order).catch(() => {});
+```
+
+```apex
+// ❌ Apex: the records stay unsaved, nobody is told, and the rest of the transaction commits
+try {
+    update accounts;
+} catch (DmlException e) {
+}
+```
+
+### Anti-pattern 2: Overly broad catch
 
 ```python
-# ❌ 捕获所有异常，无法区分失败类型
+# ❌ Catches everything, so the failure types can't be told apart
 try:
     result = risky()
 except Exception as e:
     logger.error(f"failed: {e}")
 
-# ✅ 捕获特定异常
+# ✅ Catch specific exceptions
 try:
     result = risky()
 except ConnectionError as e:
@@ -134,164 +139,223 @@ except ValueError as e:
     raise
 ```
 
-### 反模式 3: 丢失原始异常
+### Anti-pattern 3: Losing the original exception
 
 ```python
-# ❌ 丢失了原始异常的堆栈和信息
+# ❌ The original exception is not recorded as the cause
 try:
     result = external_api.call()
 except APIError as e:
-    raise RuntimeError("API failed")  # 丢失了原因
+    raise RuntimeError("API failed")  # no "from e"
 
-# ✅ 保留异常链
+# ✅ Keep the exception chain
 try:
     result = external_api.call()
 except APIError as e:
     raise RuntimeError("API failed") from e
 ```
 
-```java
-// ❌ 丢失原始异常
-catch (IOException e) {
-    throw new ServiceException("IO failed");
+```typescript
+// ❌ The original error is lost
+try {
+    await copyFile(source, destination);
+} catch (err) {
+    throw new ServiceError('IO failed');
 }
 
-// ✅ 保留原因
-catch (IOException e) {
-    throw new ServiceException("IO failed", e);
+// ✅ Keep the cause (ES2022 Error options)
+try {
+    await copyFile(source, destination);
+} catch (err) {
+    throw new ServiceError('IO failed', { cause: err });
 }
 ```
 
-### 反模式 4: 用异常做流程控制
+### Anti-pattern 4: Exceptions for control flow
 
 ```python
-# ❌ 异常做正常流程控制（慢且不清晰）
+# ❌ Exceptions used for normal control flow (slow and unclear)
 try:
     user = users[name]
 except KeyError:
     user = create_default_user(name)
 
-# ✅ 显式检查
+# ✅ Explicit check
 user = users.get(name) or create_default_user(name)
 ```
 
-```go
-// ❌ Go: panic 做流程控制
-func getUser(id int) User {
-    if id <= 0 {
-        panic("invalid id")
+```typescript
+// ❌ An expected "not found" is thrown, so callers write try/catch as an if/else
+//    (and the bare catch also swallows real failures, such as a lost connection)
+function resolveUser(id: string): User {
+    try {
+        return getUser(id); // throws when the id is unknown
+    } catch {
+        return createDefaultUser(id);
     }
 }
 
-// ✅ Go: 返回 error
-func getUser(id int) (User, error) {
-    if id <= 0 {
-        return User{}, fmt.Errorf("invalid user id: %d", id)
-    }
+// ✅ Put the expected miss in the return type; keep exceptions for real failures
+function findUser(id: string): User | undefined {
+    return usersById.get(id);
 }
+
+const user = findUser(id) ?? createDefaultUser(id);
 ```
 
-### 反模式 5: 忽略返回值
+### Anti-pattern 5: Ignoring return values
 
-```csharp
-// ❌ 忽略返回的 bool/Result
-dict.TryGetValue("key", out var value);
-// value 可能是默认值，但代码继续执行如同成功
+```python
+# ❌ str methods return a new string: the stripped copy is discarded
+name.strip()
+save(name)  # still has the surrounding whitespace
 
-// ✅ 检查返回值
-if (!dict.TryGetValue("key", out var value))
-{
-    throw new KeyNotFoundException("key not found");
+# ✅ Use the return value
+name = name.strip()
+save(name)
+
+# ❌ re.match returns None when nothing matches
+user_id = re.match(r"user-(\d+)", key).group(1)  # AttributeError on None
+
+# ✅ Check the result
+match = re.match(r"user-(\d+)", key)
+if match is None:
+    raise ValueError(f"unexpected key format: {key!r}")
+user_id = match.group(1)
+```
+
+```typescript
+// ❌ fetch resolves on HTTP 4xx/5xx; ignoring response.ok treats an error page as data
+const order = await (await fetch(url)).json();
+
+// ✅ Check the status before using the body
+const response = await fetch(url);
+if (!response.ok) {
+    throw new Error(`GET ${url} failed with HTTP ${response.status}`);
+}
+const order: unknown = await response.json();
+```
+
+```apex
+// ❌ allOrNone = false reports failures in the results instead of throwing; here they are dropped
+Database.update(records, false);
+
+// ✅ Keep the results and record which rows failed and why (results follow the input order)
+Map<Id, List<Database.Error>> errorsById = new Map<Id, List<Database.Error>>();
+List<Database.SaveResult> results = Database.update(records, false, AccessLevel.USER_MODE);
+for (Integer i = 0; i < results.size(); i++) {
+    if (!results[i].isSuccess()) {
+        errorsById.put(records[i].Id, results[i].getErrors());
+    }
 }
 ```
 
 ---
 
-## 错误层次设计
+## Error Hierarchy Design
 
-### 三层错误架构
+### Three-tier error architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│ Application Errors（应用级）                      │
-│   - AppError / ServiceError                      │
-│   - 全局异常处理器捕获，返回用户友好的响应          │
-├─────────────────────────────────────────────────┤
-│ Module Errors（模块级）                            │
-│   - PaymentError, AuthError, ValidationError     │
-│   - 每个业务模块定义自己的错误类型                  │
-├─────────────────────────────────────────────────┤
-│ Infrastructure Errors（基础设施级）                │
-│   - IOError, NetworkError, DatabaseError         │
-│   - 来自操作系统、网络、数据库的底层错误            │
-└─────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│ Application Errors                                         │
+│   - AppError / ServiceError                                │
+│   - Caught by the global exception handler, which returns  │
+│     a user-friendly response                               │
+├────────────────────────────────────────────────────────────┤
+│ Module Errors                                              │
+│   - PaymentError, AuthError, ValidationError               │
+│   - Each business module defines its own error types       │
+├────────────────────────────────────────────────────────────┤
+│ Infrastructure Errors                                      │
+│   - IOError, NetworkError, DatabaseError                   │
+│   - Low-level errors from the OS, network, and database    │
+└────────────────────────────────────────────────────────────┘
 ```
 
-### 设计规则
+### Design rules
 
-1. **模块级错误继承自应用级基类**，便于全局 catch
-2. **基础设施错误在模块边界转换为模块级错误**，不暴露给上层
-3. **每个错误类型包含足够的上下文**用于调试（ID、时间戳、操作名称）
+1. **Module errors inherit from the application base class**, so they can be caught globally
+2. **Infrastructure errors are converted into module errors at the module boundary**, so they never leak to upper layers
+3. **Every error type carries enough context** for debugging (IDs, timestamp, operation name)
 
-### 示例层次（Python）
+### Example hierarchy (Python)
 
 ```python
 class AppError(Exception):
-    """应用基础异常"""
+    """Base application exception"""
     pass
 
 class PaymentError(AppError):
-    """支付模块错误"""
+    """Payment module error"""
     def __init__(self, order_id: str, reason: str):
         self.order_id = order_id
         super().__init__(f"payment failed for order {order_id}: {reason}")
 
 class PaymentGatewayTimeout(PaymentError):
-    """支付网关超时"""
+    """Payment gateway timed out"""
     def __init__(self, order_id: str, gateway: str, timeout_ms: int):
         self.gateway = gateway
         self.timeout_ms = timeout_ms
         super().__init__(order_id, f"gateway {gateway} timed out after {timeout_ms}ms")
 ```
 
-### 示例层次（Java）
+### Example hierarchy (TypeScript)
 
-```java
-public class AppException extends RuntimeException {
-    private final String errorCode;
-    public AppException(String errorCode, String message, Throwable cause) {
-        super(message, cause);
-        this.errorCode = errorCode;
+```typescript
+interface AppErrorOptions extends ErrorOptions {
+    code?: string;
+}
+
+class AppError extends Error {
+    readonly code: string | undefined;
+
+    constructor(message: string, { code, cause }: AppErrorOptions = {}) {
+        super(message, { cause }); // native ES2022 cause: loggers and debuggers follow the chain
+        this.name = new.target.name; // each subclass reports its own name
+        this.code = code;
     }
 }
 
-public class OrderNotFoundException extends AppException {
-    public OrderNotFoundException(Long orderId) {
-        super("ORDER_NOT_FOUND", "Order " + orderId + " not found", null);
+class OrderNotFoundError extends AppError {
+    readonly orderId: string;
+
+    constructor(orderId: string) {
+        super(`order ${orderId} not found`, { code: 'ORDER_NOT_FOUND' });
+        this.orderId = orderId;
+    }
+}
+
+class PaymentGatewayError extends AppError {
+    readonly gateway: string;
+
+    constructor(gateway: string, cause: unknown) {
+        super(`payment gateway ${gateway} failed`, { code: 'PAYMENT_GATEWAY_FAILED', cause });
+        this.gateway = gateway;
     }
 }
 ```
 
 ---
 
-## 日志最佳实践
+## Logging Best Practices
 
-### 日志级别选择
+### Choosing a log level
 
-| 级别 | 何时使用 | 示例 |
+| Level | When to use | Examples |
 |------|---------|------|
-| **ERROR** | 需要人工介入的故障 | 支付失败、数据不一致 |
-| **WARN** | 可自动恢复的异常 | 重试成功、降级处理 |
-| **INFO** | 正常业务事件 | 订单创建、用户登录 |
-| **DEBUG** | 调试信息 | 函数参数、中间状态 |
+| **ERROR** | Failures that need human intervention | Payment failure, data inconsistency |
+| **WARN** | Problems that recover automatically | Retry succeeded, degraded fallback |
+| **INFO** | Normal business events | Order created, user logged in |
+| **DEBUG** | Debugging details | Function arguments, intermediate state |
 
-### 日志格式
+### Log format
 
 ```
-// ❌ 无结构化信息
+// ❌ No structured information
 log.error("failed to process")
 
-// ✅ 结构化信息 + 上下文
+// ✅ Structured fields + context
 log.error("payment_failed", {
     "order_id": "12345",
     "gateway": "stripe",
@@ -301,20 +365,20 @@ log.error("payment_failed", {
 })
 ```
 
-### 日志安全
+### Log security
 
-- **不要记录敏感信息**：密码、token、PII、完整信用卡号
-- **脱敏处理**：`email: a***@example.com`
-- **日志注入防护**：对用户输入做转义，防止伪造日志行
+- **Never log sensitive data**: passwords, tokens, PII, full credit card numbers
+- **Mask values**: `email: a***@example.com`
+- **Prevent log injection**: escape user input so it cannot forge log lines
 
 ---
 
-## 跨语言代码示例
+## Code Examples by Language
 
 ### Python
 
 ```python
-# ✅ 特定异常 + 上下文 + 异常链
+# ✅ Specific exceptions + context + exception chaining
 try:
     response = http_client.post(url, data=payload)
     response.raise_for_status()
@@ -326,118 +390,20 @@ except requests.HTTPError as e:
     raise PaymentGatewayError(f"HTTP {response.status_code} from {gateway_name}") from e
 ```
 
-### Java
-
-```java
-// ✅ 特定异常 + 上下文 + 原因链
-try {
-    var response = httpClient.send(request, BodyHandlers.ofString());
-    if (response.statusCode() == 404) {
-        throw new OrderNotFoundException(orderId);
-    }
-} catch (IOException e) {
-    throw new PaymentGatewayException(
-        "gateway unreachable: " + gatewayUrl, e);
-}
-```
-
-### Go
-
-```go
-// ✅ 错误包装 + 上下文 + %w 保留链
-result, err := client.Do(req)
-if err != nil {
-    return fmt.Errorf("payment gateway %s request failed: %w", gatewayName, err)
-}
-defer result.Body.Close()
-
-if result.StatusCode == http.StatusNotFound {
-    return fmt.Errorf("order %d not found: %w", orderID, ErrNotFound)
-}
-```
-
-### Rust
-
-```rust
-// ✅ thiserror 定义错误类型 + 上下文
-#[derive(Debug, thiserror::Error)]
-enum PaymentError {
-    #[error("gateway {gateway} unreachable")]
-    GatewayUnreachable {
-        gateway: String,
-        #[source]
-        source: reqwest::Error,
-    },
-    #[error("order {order_id} not found")]
-    OrderNotFound { order_id: u64 },
-}
-
-async fn process_payment(gateway: &str, order_id: u64) -> Result<(), PaymentError> {
-    let response = client.post(url)
-        .send()
-        .await
-        .map_err(|e| PaymentError::GatewayUnreachable {
-            gateway: gateway.into(),
-            source: e,
-        })?;
-    Ok(())
-}
-```
-
-### C#
-
-```csharp
-// ✅ 特定异常 + 上下文
-try
-{
-    var response = await httpClient.PostAsync(url, content);
-    response.EnsureSuccessStatusCode();
-}
-catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
-{
-    throw new OrderNotFoundException(orderId, ex);
-}
-catch (HttpRequestException ex)
-{
-    throw new PaymentGatewayException($"gateway unreachable: {url}", ex);
-}
-```
-
-### Swift
-
-```swift
-// ✅ Error enum + 上下文
-enum PaymentError: Error {
-    case gatewayUnreachable(name: String, underlying: Error)
-    case orderNotFound(id: Int)
-    case declined(reason: String)
-}
-
-func processPayment(orderId: Int) throws -> Receipt {
-    guard orderId > 0 else {
-        throw PaymentError.orderNotFound(id: orderId)
-    }
-    do {
-        let response = try networkClient.post(url, body: payload)
-        return try Receipt(from: response)
-    } catch let error as NetworkError {
-        throw PaymentError.gatewayUnreachable(name: gateway, underlying: error)
-    }
-}
-```
+> 📖 Depth: [Python exception handling](../python.md#exception-handling)
 
 ### TypeScript
 
 ```typescript
-// ✅ 自定义错误类 + 上下文
+// ✅ Custom error class + context + native cause
 class PaymentError extends Error {
     constructor(
         message: string,
         public readonly orderId: string,
         public readonly gateway: string,
-        public readonly cause?: Error,
+        cause?: unknown,
     ) {
-        super(message);
+        super(message, { cause }); // native ES2022 Error.cause instead of a field that shadows it
         this.name = 'PaymentError';
     }
 }
@@ -462,31 +428,94 @@ async function processPayment(orderId: string): Promise<Receipt> {
 }
 ```
 
+> 📖 Depth: [Throw Error objects and keep the cause](../javascript.md#throw-error-objects-and-keep-the-cause) · [Node.js async error handling](../nodejs.md#async-error-handling) · [NestJS error handling](../nestjs.md#error-handling)
+
+### Salesforce Apex
+
+Apex rolls back only the failed DML statement when an exception is caught, and the rest of the transaction still commits, so a swallowed exception quietly loses data. Uncaught exceptions roll back the whole transaction.
+
+```apex
+public with sharing class InvoiceService {
+    public class InvoiceException extends Exception {}
+
+    // ❌ The failure disappears: the caller believes the invoices were saved
+    public static void createSilently(List<Invoice__c> invoices) {
+        try {
+            insert invoices;
+        } catch (DmlException e) {
+        }
+    }
+
+    // ✅ Partial success in user mode: inspect every SaveResult and report the failures
+    public static List<String> create(List<Invoice__c> invoices) {
+        List<String> failures = new List<String>();
+        List<Database.SaveResult> results = Database.insert(invoices, false, AccessLevel.USER_MODE);
+        for (Integer i = 0; i < results.size(); i++) {
+            for (Database.Error err : results[i].getErrors()) {
+                failures.add('Row ' + i + ': ' + err.getStatusCode() + ': ' + err.getMessage());
+            }
+        }
+        return failures;
+    }
+
+    // submit(Id invoiceId) throws InvoiceException when the invoice cannot be submitted
+}
+
+public with sharing class InvoiceTriggerHandler {
+    // ✅ Trigger validation: addError() fails the record with a message for the user
+    //    instead of throwing (pass Trigger.new from a before insert/update trigger)
+    public static void validate(List<Invoice__c> newInvoices) {
+        for (Invoice__c inv : newInvoices) {
+            if (inv.Amount__c == null || inv.Amount__c < 0) {
+                inv.Amount__c.addError('Amount must be zero or greater.');
+            }
+        }
+    }
+}
+
+public with sharing class InvoiceController {
+    // ✅ LWC boundary: keep the details in the server log, send the client a user-safe message
+    @AuraEnabled
+    public static void submitInvoice(Id invoiceId) {
+        try {
+            InvoiceService.submit(invoiceId);
+        } catch (InvoiceService.InvoiceException e) {
+            // log e.getMessage() and e.getStackTraceString() with the project's logger here
+            throw new AuraHandledException('The invoice could not be submitted. Please try again.');
+        }
+    }
+}
+
+// ⚠️ System.LimitException cannot be caught: no catch block survives a governor-limit breach,
+//    and the transaction rolls back. Fix the design (bulkify, move work to async Apex).
+```
+
+Static analysis: PMD `EmptyCatchBlock`.
+
+> 📖 Depth: [Apex transactions and error handling](../salesforce/apex.md#transactions--error-handling) · [The LWC-Apex contract](../salesforce/lwc.md#the-lwc-apex-contract) · [Flow fault handling](../salesforce/flows.md#fault-handling)
+
 ---
 
 ## Review Checklist
 
-### 核心检查
-- [ ] 没有空 catch 块或静默忽略错误
-- [ ] 错误信息包含操作描述和关键参数
-- [ ] 使用特定错误类型（非通用 Error/Exception）
-- [ ] 异常链保留（from / cause / %w）
-- [ ] 前置条件在操作开始前验证（fail fast）
+### Core checks
+- [ ] No empty catch blocks or silently ignored errors
+- [ ] Error messages include the operation and the key parameters
+- [ ] Specific error types are used (not a generic Error/Exception)
+- [ ] The exception chain is preserved (`raise ... from`, `{ cause }`)
+- [ ] Preconditions are validated before the operation starts (fail fast)
 
-### 架构检查
-- [ ] 定义了清晰的错误层次（应用/模块/基础设施）
-- [ ] 全局异常处理器捕获未处理错误
-- [ ] API 边界将内部错误转换为适当的 HTTP 状态码
+### Architecture checks
+- [ ] A clear error hierarchy is defined (application / module / infrastructure)
+- [ ] A global exception handler catches unhandled errors
+- [ ] API boundaries convert internal errors into the appropriate HTTP status codes
 
-### 日志检查
-- [ ] 错误日志包含结构化上下文
-- [ ] 没有记录敏感信息（密码、token、PII）
-- [ ] 日志级别使用正确（ERROR vs WARN vs INFO）
+### Logging checks
+- [ ] Error logs include structured context
+- [ ] No sensitive data is logged (passwords, tokens, PII)
+- [ ] Log levels are used correctly (ERROR vs WARN vs INFO)
 
-### 语言特定
-- [ ] Go: error 不忽略，使用 `%w` 包装
-- [ ] Python: catch 特定异常，使用 `from` 保留链
-- [ ] Java: 异常有 cause，使用特定类型
-- [ ] Rust: `?` 传播，自定义 Error 类型
-- [ ] C#: when 过滤器，特定异常类型
-- [ ] Swift: do-catch，Result 用于延迟处理
+### Language-specific
+- [ ] Python: catch specific exceptions; use `from` to keep the chain
+- [ ] TypeScript: no floating promises; errors are wrapped with `{ cause }`; typed `Error` subclasses are thrown, never strings or plain objects
+- [ ] Apex: no empty catch blocks; `SaveResult` is inspected after partial-success DML; `AuraHandledException` with a user-safe message at the LWC boundary

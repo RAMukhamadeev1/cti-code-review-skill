@@ -1,26 +1,29 @@
 # NestJS Code Review Guide
 
-> NestJS 代码审查指南，覆盖依赖注入与分层架构、模块组织、Guard/Interceptor/Pipe、DTO 验证、错误处理、循环依赖及测试模式等核心主题。
+Review guidance for NestJS applications: dependency injection and layered architecture, module organization, Guard/Interceptor/Pipe responsibilities, DTO validation, error handling, circular dependencies, testing patterns, and lifecycle and runtime concerns.
 
-## 目录
+> **Related guides:** NestJS code is TypeScript on Node.js. Load [typescript.md](typescript.md) for type-level issues and [javascript.md](javascript.md) for async and Promise pitfalls. Load [nodejs.md](nodejs.md) when the change touches bootstrap (`main.ts`), shutdown, streams, configuration, or other process-level concerns.
 
-- [依赖注入与分层架构](#依赖注入与分层架构)
-- [模块组织](#模块组织)
+## Table of Contents
+
+- [Dependency Injection & Layered Architecture](#dependency-injection--layered-architecture)
+- [Module Organization](#module-organization)
 - [Guard / Interceptor / Pipe](#guard--interceptor--pipe)
-- [验证模式 (DTO)](#验证模式-dto)
-- [错误处理](#错误处理)
-- [循环依赖](#循环依赖)
-- [测试模式](#测试模式)
+- [Validation Patterns (DTO)](#validation-patterns-dto)
+- [Error Handling](#error-handling)
+- [Circular Dependencies](#circular-dependencies)
+- [Testing Patterns](#testing-patterns)
+- [Lifecycle & Runtime](#lifecycle--runtime)
 - [Review Checklist](#review-checklist)
 
 ---
 
-## 依赖注入与分层架构
+## Dependency Injection & Layered Architecture
 
-### 三层架构：Controller → Service → Repository
+### Three-layer architecture: Controller → Service → Repository
 
 ```typescript
-// ❌ ORM 直接注入 Controller，跳过 Service 层
+// ❌ ORM injected straight into the Controller, skipping the Service layer
 @Controller('users')
 export class UsersController {
   constructor(private readonly prisma: PrismaService) {}
@@ -52,16 +55,16 @@ export class UsersService {
 }
 ```
 
-### Repository 之间不应互相注入
+### Repositories should not inject each other
 
 ```typescript
-// ❌ Repository 导入另一个 Repository——编排逻辑属于 Service
+// ❌ A Repository injects another Repository; orchestration belongs in a Service
 @Injectable()
 export class OrdersRepository {
   constructor(private readonly usersRepository: UsersRepository) {}
 }
 
-// ✅ 跨 Repository 编排在 Service 中完成
+// ✅ Cross-repository orchestration happens in the Service
 @Injectable()
 export class OrdersService {
   constructor(
@@ -71,10 +74,10 @@ export class OrdersService {
 }
 ```
 
-### God Service：依赖超过 8 个时拆分
+### God service: split it once it has more than 8 dependencies
 
 ```typescript
-// ❌ 9 个依赖的巨型 Service
+// ❌ A giant Service with 9 dependencies
 @Injectable()
 export class OrdersService {
   constructor(
@@ -90,7 +93,7 @@ export class OrdersService {
   ) {}
 }
 
-// ✅ 拆分为 Use-Case Service（一个文件一个操作）
+// ✅ Split into use-case services (one operation per file)
 @Injectable()
 export class CreateOrderService {
   constructor(
@@ -102,16 +105,16 @@ export class CreateOrderService {
 }
 ```
 
-### Symbol Token 实现依赖反转
+### Dependency inversion with Symbol tokens
 
 ```typescript
-// ❌ 直接依赖具体实现——测试时无法替换
+// ❌ Depends directly on a concrete implementation; it cannot be swapped in tests
 @Injectable()
 export class UsersService {
   constructor(private readonly repo: TypeOrmUserRepository) {}
 }
 
-// ✅ 接口 + Symbol Token——可替换为内存实现
+// ✅ Interface + Symbol token; it can be swapped for an in-memory implementation
 export const USER_REPOSITORY = Symbol('USER_REPOSITORY');
 
 export interface UserRepository {
@@ -134,31 +137,31 @@ export class UsersService {
 
 ---
 
-## 模块组织
+## Module Organization
 
-### 推荐四层结构
+### Recommended four-layer structure
 
-```
+```text
 src/
-  common/         ← 全局技术基础设施（Guards、Filters、Interceptors、Decorators）
-  core/           ← 内部基础设施（Config、Database、Queue 配置）
-  integrations/   ← 外部服务封装（Mailer、Storage、Stripe、SMS）
-  modules/        ← 按领域组织的业务逻辑
+  common/         ← Global technical infrastructure (Guards, Filters, Interceptors, Decorators)
+  core/           ← Internal infrastructure (Config, Database, Queue setup)
+  integrations/   ← Wrappers for external services (Mailer, Storage, Stripe, SMS)
+  modules/        ← Business logic organized by domain
     [feature]/
       dtos/
       repositories/
       services/
-        internal/     ← 模块内共享 Service
-        use-cases/    ← 一个文件 = 一个操作
+        internal/     ← Services shared inside the module
+        use-cases/    ← One file = one operation
       types/
       [feature].controller.ts
       [feature].module.ts
 ```
 
-### Domain 必须框架无关
+### The domain must be framework-agnostic
 
 ```typescript
-// ❌ Domain Entity 依赖 NestJS——不可独立测试
+// ❌ The domain entity depends on NestJS and cannot be tested on its own
 import { Injectable } from '@nestjs/common';
 
 @Injectable()
@@ -166,7 +169,7 @@ export class User {
   constructor(private readonly email: string) {}
 }
 
-// ✅ Domain 是纯类，无框架装饰器
+// ✅ Domain entities are plain classes without framework decorators
 export class User {
   private constructor(private readonly email: string) {}
 
@@ -176,20 +179,20 @@ export class User {
 }
 ```
 
-### 关键规则
+### Key rules
 
-- `common/` 必须 **不涉及业务**——如果需要知道"订单"，它不属于这里
-- `integrations/` 封装每个外部服务；换 SendGrid → AWS SES 只改一个目录
-- 使用 **Use-Case Service**（一个文件一个操作）而非 15 个方法的巨型 `XxxService`
+- `common/` must contain **no business logic**: if it needs to know about "orders", it does not belong there
+- `integrations/` wraps each external service; switching from SendGrid to AWS SES changes a single directory
+- Use **use-case services** (one operation per file) instead of a giant `XxxService` with 15 methods
 
 ---
 
 ## Guard / Interceptor / Pipe
 
-### 业务逻辑不应放在 Guard 中
+### Business logic does not belong in guards
 
 ```typescript
-// ❌ Guard 中查询数据库 + 业务判断
+// ❌ The Guard queries the database and makes a business decision
 @Injectable()
 export class OrderOwnershipGuard implements CanActivate {
   constructor(private readonly prisma: PrismaService) {}
@@ -200,13 +203,13 @@ export class OrderOwnershipGuard implements CanActivate {
       where: { id: req.params.id },
     });
     if (order.userId !== req.user.id) {
-      return false; // 数据获取 + 业务规则判断都在 Guard 里
+      return false; // Data access and the business rule both live in the Guard
     }
     return true;
   }
 }
 
-// ✅ Guard 只做授权检查（角色/权限）
+// ✅ The Guard only checks authorization (roles/permissions)
 @Injectable()
 export class RolesGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
@@ -223,19 +226,19 @@ export class RolesGuard implements CanActivate {
 }
 ```
 
-### Interceptor 只用于横切关注点
+### Use interceptors only for cross-cutting concerns
 
 ```typescript
-// ❌ Interceptor 中执行业务逻辑
+// ❌ Business logic inside an Interceptor
 @Injectable()
 export class PricingInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler) {
-    // 计算折扣——这不是横切关注点！
+    // Calculating discounts is not a cross-cutting concern!
     return next.handle().pipe(map(data => applyDiscount(data)));
   }
 }
 
-// ✅ Interceptor 用于日志、缓存、响应转换、计时
+// ✅ Interceptors for logging, caching, response mapping, and timing
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler) {
@@ -248,16 +251,16 @@ export class LoggingInterceptor implements NestInterceptor {
 }
 ```
 
-### 全局 ValidationPipe 必须配置 whitelist
+### The global ValidationPipe must set whitelist
 
 ```typescript
-// ❌ 没有 whitelist——请求体中的额外属性直接传入
+// ❌ No whitelist: extra properties in the request body pass straight through
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   await app.listen(3000);
 }
 
-// ✅ 全局 ValidationPipe + whitelist 过滤未知属性
+// ✅ A global ValidationPipe with whitelist strips unknown properties
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.useGlobalPipes(
@@ -273,18 +276,18 @@ async function bootstrap() {
 
 ---
 
-## 验证模式 (DTO)
+## Validation Patterns (DTO)
 
-### @ValidateNested() 必须搭配 @Type()
+### `@ValidateNested()` must be paired with `@Type()`
 
 ```typescript
-// ❌ 只有 @ValidateNested——嵌套对象验证被静默跳过！
+// ❌ @ValidateNested alone: validation of the nested object is silently skipped!
 export class CreateOrderDto {
   @ValidateNested()
   shipping: AddressDto;
 }
 
-// ✅ @ValidateNested + @Type 配对使用
+// ✅ Use @ValidateNested and @Type together
 import { Type } from 'class-transformer';
 
 export class CreateOrderDto {
@@ -299,16 +302,16 @@ export class CreateOrderDto {
 }
 ```
 
-### 禁止裸 any Body
+### No bare `any` body
 
 ```typescript
-// ❌ 没有 DTO——无验证、无类型安全、无 Swagger 文档
+// ❌ No DTO: no validation, no type safety, no Swagger docs
 @Post()
 create(@Body() body: any) {
   return this.service.create(body);
 }
 
-// ✅ 为每个操作创建 DTO
+// ✅ Create a DTO for every operation
 export class CreateUserDto {
   @IsEmail()
   email: string;
@@ -325,28 +328,28 @@ create(@Body() dto: CreateUserDto) {
 }
 ```
 
-### Create 和 Update 应使用不同 DTO
+### Create and update should use different DTOs
 
 ```typescript
-// ❌ PATCH 也要求所有字段——不合理的 API 设计
+// ❌ PATCH also requires every field, which is poor API design
 @Patch(':id')
 update(@Body() dto: CreateUserDto) { /* all fields required */ }
 
-// ✅ Update 使用 PartialType
+// ✅ Update uses PartialType
 export class UpdateUserDto extends PartialType(CreateUserDto) {}
 
 @Patch(':id')
 update(@Body() dto: UpdateUserDto) { /* all fields optional */ }
 ```
 
-### 可选嵌套对象
+### Optional nested objects
 
 ```typescript
-// ❌ 可选嵌套对象缺少 @IsOptional
+// ❌ Optional nested object without @IsOptional
 export class UpdateOrderDto {
   @ValidateNested()
   @Type(() => AddressDto)
-  shipping?: AddressDto; // undefined 时仍尝试验证
+  shipping?: AddressDto; // Validation still runs when it is undefined
 }
 
 // ✅ @IsOptional + @ValidateNested + @Type
@@ -360,12 +363,12 @@ export class UpdateOrderDto {
 
 ---
 
-## 错误处理
+## Error Handling
 
-### 禁止吞掉错误
+### Never swallow errors
 
 ```typescript
-// ❌ catch { return null }——隐藏了问题，调用者无法区分"不存在"和"出错了"
+// ❌ catch { return null } hides the problem: callers cannot tell "not found" from "failed"
 async findOne(id: string) {
   try {
     return await this.repo.findById(id);
@@ -374,7 +377,7 @@ async findOne(id: string) {
   }
 }
 
-// ✅ 抛出有意义的异常
+// ✅ Throw a meaningful exception
 async findOne(id: string): Promise<User> {
   const user = await this.repo.findById(id);
   if (!user) {
@@ -384,13 +387,15 @@ async findOne(id: string): Promise<User> {
 }
 ```
 
-### 使用内置异常类
+> 📖 Cross-language principles (don't swallow errors, add context, use specific types, fail fast, handle each error once): [Error Handling Principles](cross-cutting/error-handling-principles.md#core-principles).
+
+### Use the built-in exception classes
 
 ```typescript
-// ❌ 手动构造 HTTP 响应
+// ❌ Building the HTTP error by hand
 throw new HttpException('Bad request', 400);
 
-// ✅ 使用语义化的内置异常
+// ✅ Use the semantic built-in exceptions
 throw new BadRequestException('Invalid email format');
 throw new NotFoundException('User not found');
 throw new ConflictException('Email already taken');
@@ -398,10 +403,10 @@ throw new ForbiddenException('Insufficient permissions');
 throw new UnauthorizedException('Invalid credentials');
 ```
 
-### 自定义异常过滤器
+### Custom exception filters
 
 ```typescript
-// ✅ 全局异常过滤器——统一响应格式
+// ✅ A global exception filter gives every error the same response format
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
@@ -429,9 +434,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
 ---
 
-## 循环依赖
+## Circular Dependencies
 
-### 模块间循环引用
+### Circular references between modules
 
 ```typescript
 // ❌ Module A ↔ Module B
@@ -441,7 +446,7 @@ export class OrdersModule {}
 @Module({ imports: [OrdersModule] })
 export class UsersModule {}
 
-// ✅ 提取共享逻辑到第三个模块
+// ✅ Move the shared logic into a third module
 @Module({
   providers: [SharedService],
   exports: [SharedService],
@@ -455,29 +460,29 @@ export class OrdersModule {}
 export class UsersModule {}
 ```
 
-### forwardRef 是最后手段
+### `forwardRef` is a last resort
 
 ```typescript
-// ⚠️ forwardRef 表示设计有问题——优先重新设计
+// ⚠️ forwardRef signals a design problem; redesign first
 @Module({
   imports: [forwardRef(() => UsersModule)],
 })
 export class OrdersModule {}
 
-// ✅ 重新设计消除循环：
-// 1. 提取共享模块
-// 2. 使用事件驱动（EventEmitter）代替直接调用
-// 3. 将共享逻辑提升到上层 Service
+// ✅ Redesign to remove the cycle:
+// 1. Extract a shared module
+// 2. Use events (EventEmitter) instead of direct calls
+// 3. Move the shared logic up into a higher-level Service
 ```
 
 ---
 
-## 测试模式
+## Testing Patterns
 
-### Use-Case 可脱离 NestJS 测试
+### Use cases can be tested without NestJS
 
 ```typescript
-// ✅ 无需 NestFactory——直接 new
+// ✅ No NestFactory needed: construct the handler directly
 describe('CreateUserHandler', () => {
   let handler: CreateUserHandler;
   let repo: InMemoryUserRepository;
@@ -503,7 +508,7 @@ describe('CreateUserHandler', () => {
 });
 ```
 
-### E2E 测试应配置与生产一致的 Pipes
+### E2E tests should configure the same pipes as production
 
 ```typescript
 describe('UsersController (e2e)', () => {
@@ -515,7 +520,7 @@ describe('UsersController (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
-    // 必须与 main.ts 中相同的全局配置
+    // Must match the global configuration in main.ts
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -544,50 +549,110 @@ describe('UsersController (e2e)', () => {
 
 ---
 
+## Lifecycle & Runtime
+
+### Enable shutdown hooks
+
+Nest runs `onModuleDestroy`, `beforeApplicationShutdown`, and `onApplicationShutdown` when `app.close()` is called, but it reacts to SIGTERM only after `app.enableShutdownHooks()`. Without that call, a rolling deploy stops the process with database pools and queue consumers still open. NestJS 12 calls these hooks by component hierarchy level, which can change their order, so re-check teardown code that relies on one provider closing before another.
+
+```typescript
+// ✅ main.ts: without enableShutdownHooks(), SIGTERM ends the process and no destroy hook runs
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.enableShutdownHooks();
+  await app.listen(3000);
+}
+
+// ✅ Each provider closes the connections and consumers it owns
+@Injectable()
+export class OrdersConsumer implements OnModuleDestroy {
+  constructor(private readonly queue: QueueClient) {}
+
+  async onModuleDestroy() {
+    await this.queue.close();
+  }
+}
+```
+
+> 📖 Signal handling, connection draining, and forced-exit timers: [nodejs.md](nodejs.md#process-lifecycle--graceful-shutdown).
+
+### Request-scoped providers bubble up the injection chain
+
+A `Scope.REQUEST` provider makes every provider and controller that injects it request-scoped as well, so Nest rebuilds that part of the graph for every request, and lifecycle hooks never run on those instances. Keep providers singletons and carry per-request context in `AsyncLocalStorage`, for example with `nestjs-cls`, which the NestJS docs present as an alternative to request-scoped providers.
+
+```typescript
+// ❌ OrdersService, and every controller that injects it, become request-scoped
+@Injectable({ scope: Scope.REQUEST })
+export class RequestContext {
+  constructor(@Inject(REQUEST) readonly request: Request) {}
+}
+
+@Injectable()
+export class OrdersService {
+  constructor(private readonly context: RequestContext) {}
+}
+
+// ✅ Singletons; nestjs-cls keeps per-request values in AsyncLocalStorage
+@Module({
+  imports: [
+    ClsModule.forRoot({
+      global: true,
+      middleware: {
+        mount: true,
+        setup: (cls, req) => cls.set('requestId', req.headers['x-request-id'] ?? randomUUID()),
+      },
+    }),
+  ],
+})
+export class AppModule {}
+
+// Singleton services inject ClsService and read the value: this.cls.get('requestId')
+```
+
+---
+
 ## Review Checklist
 
-### 分层架构
+### Layered architecture
+- [ ] ORM/Prisma clients are not injected directly into Controllers
+- [ ] No business logic in Controllers
+- [ ] Repositories do not inject each other
+- [ ] Services have ≤ 8 dependencies (split into use cases beyond that)
 
-- [ ] ORM/Prisma 未直接注入 Controller
-- [ ] 业务逻辑不在 Controller 中
-- [ ] Repository 之间无互相注入
-- [ ] Service 依赖数 ≤ 8（超出则拆分为 Use-Case）
+### Dependency injection
+- [ ] Interfaces + Symbol tokens are used for swappable dependencies
+- [ ] No `forwardRef()` (if there is one, a design note explains why)
+- [ ] Scoped services are not injected into singletons (request scope bubbles up to every consumer)
 
-### 依赖注入
-
-- [ ] 接口 + Symbol Token 用于可替换的依赖
-- [ ] 无 `forwardRef()`（如有，需设计文档说明原因）
-- [ ] Scoped 服务未注入到 Singleton 中
-
-### 验证
-
-- [ ] 每个 `@ValidateNested()` 都有对应的 `@Type()`
-- [ ] 全局 `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true })` 已配置
-- [ ] 无 `@Body() body: any`——必须使用 DTO
-- [ ] Create 和 Update 使用不同 DTO（`PartialType`）
-- [ ] 数组验证使用 `{ each: true }`
-- [ ] 可选嵌套对象使用 `@IsOptional()` + `@ValidateNested()` + `@Type()`
+### Validation
+- [ ] Every `@ValidateNested()` has a matching `@Type()`
+- [ ] A global `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true })` is configured
+- [ ] No `@Body() body: any`; a DTO is required
+- [ ] Create and Update use different DTOs (`PartialType`)
+- [ ] Array validation uses `{ each: true }`
+- [ ] Optional nested objects use `@IsOptional()` + `@ValidateNested()` + `@Type()`
 
 ### Guard / Interceptor / Pipe
+- [ ] Guards only check authorization and do not query the database
+- [ ] Interceptors only handle cross-cutting concerns (logging, caching, response mapping)
+- [ ] Business rules live in Services
 
-- [ ] Guard 只做授权检查，不查询数据库
-- [ ] Interceptor 只用于横切关注点（日志、缓存、响应转换）
-- [ ] 业务规则在 Service 中
+### Error handling
+- [ ] No `catch { return null }`; meaningful exceptions are thrown
+- [ ] NestJS built-in exception classes are used
+- [ ] Custom exception filters live in `common/filters/`
 
-### 错误处理
+### Modules
+- [ ] No circular module imports
+- [ ] Domain entities have no framework decorators (`@Injectable`, etc.)
+- [ ] External service calls live in `integrations/`
 
-- [ ] 无 `catch { return null }`——抛出有意义的异常
-- [ ] 使用 NestJS 内置异常类
-- [ ] 自定义异常过滤器在 `common/filters/` 中
+### Testing
+- [ ] Use-case services can be tested without NestJS
+- [ ] E2E tests configure the same global Pipes/Guards as production
+- [ ] Domain entities have zero framework dependencies
 
-### 模块
-
-- [ ] 无循环模块引用
-- [ ] Domain Entity 无框架装饰器（`@Injectable` 等）
-- [ ] 外部服务调用在 `integrations/` 中
-
-### 测试
-
-- [ ] Use-Case Service 可脱离 NestJS 测试
-- [ ] E2E 测试配置与生产一致的全局 Pipes/Guards
-- [ ] Domain Entity 零框架依赖
+### Lifecycle
+- [ ] `main.ts` calls `app.enableShutdownHooks()`
+- [ ] Providers that own connections, pools, or consumers release them in `onModuleDestroy` or `onApplicationShutdown`
+- [ ] Any `Scope.REQUEST` provider is justified; per-request context otherwise comes from `AsyncLocalStorage` (for example `nestjs-cls`)

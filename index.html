@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -171,24 +171,6 @@
       flex-wrap: wrap;
     }
 
-    .lang-toggle {
-      font-size: 12px;
-      color: var(--fg-dim);
-      letter-spacing: 0.04em;
-    }
-    .lang-toggle a {
-      color: var(--fg-dim);
-      text-decoration: none;
-      border-bottom: 1px dotted var(--fg-faint);
-      padding-bottom: 1px;
-      margin: 0 0.25em;
-    }
-    .lang-toggle a.on {
-      color: var(--amber);
-      border-bottom-color: var(--amber);
-    }
-    .lang-toggle a:hover { color: var(--amber); border-bottom-color: var(--amber); }
-    .lang-toggle .sep { color: var(--fg-faint); }
 
     .one-liner-sub {
       color: var(--fg-dim);
@@ -197,7 +179,7 @@
     /* ─── TABLES ─── */
     .lang-row {
       display: grid;
-      grid-template-columns: 26ch 1fr 7ch;
+      grid-template-columns: 30ch 1fr 7ch;
       gap: 1ch;
       padding: 0.125rem 0;
       align-items: baseline;
@@ -418,21 +400,18 @@
 
   <!-- ═══ TITLE BLOCK ═══ -->
   <div class="title-block">
-<pre class="ascii-title">  ___ ___  ___  ___        ___ _____   _____ _____      __    ___ _  _____ _    _    
- / __/ _ \|   \| __|  ___ | _ \ __\ \ / /_ _| __\ \ /\ / / __/ __| |/ /_ _| |  | |   
-| (_| (_) | |) | _|  |___||   / _| \ V / | || _| \ V  V /__\__ \ ' &lt; | || |__| |__ 
+<pre class="ascii-title">  ___ ___  ___  ___        ___ _____   _____ _____      __    ___ _  _____ _    _
+ / __/ _ \|   \| __|  ___ | _ \ __\ \ / /_ _| __\ \ /\ / / __/ __| |/ /_ _| |  | |
+| (_| (_) | |) | _|  |___||   / _| \ V / | || _| \ V  V /__\__ \ ' &lt; | || |__| |__
  \___\___/|___/|___|      |_|_\___| \_/ |___|___| \_/\_/    |___/_|\_\___|____|____|</pre>
 
     <div class="one-liner">
       <span>
         <span class="dim">$&nbsp;</span><span class="em">man code-review-skill</span><span class="cursor"></span>
       </span>
-      <span class="lang-toggle">
-        <span class="dim">LANG=</span><a href="index.html" class="on">zh_CN</a><span class="sep">&nbsp;|&nbsp;</span><a href="index.en.html">en_US</a>
-      </span>
     </div>
     <div class="one-liner-sub">
-      v1.0 &middot; awesome-skills &middot; MIT &middot; 21 languages &middot; 21,000+ lines
+      v1.0 &middot; awesome-skills &middot; MIT &middot; JS/TS &middot; Node.js &middot; NestJS &middot; Python &middot; Salesforce &middot; 16,000+ lines
     </div>
   </div>
 
@@ -440,7 +419,7 @@
   <h2 class="sec">NAME</h2>
   <section class="body">
     <p>
-      <span class="em">code-review-skill</span> &mdash; 面向 Claude Code 的全面、模块化代码审查技能
+      <span class="em">code-review-skill</span> &mdash; A modular code review skill for Claude Code, focused on JavaScript/TypeScript, Node.js, NestJS, Python, and Salesforce
     </p>
   </section>
 
@@ -449,61 +428,54 @@
   <section class="body">
     <pre class="pre">
 <span class="amber">Use code-review-skill to</span> review this PR
-<span class="amber">Use code-review-skill to</span> review this &lt;<span class="dim">component</span>&gt;
+<span class="amber">Use code-review-skill to</span> review this &lt;<span class="dim">Apex class | LWC | flow | Node service</span>&gt;
 <span class="amber">Use code-review-skill for</span> <span class="dim">[</span>security <span class="dim">|</span> performance <span class="dim">|</span> architecture<span class="dim">]</span> review</pre>
   </section>
 
   <!-- ═══ DESCRIPTION ═══ -->
   <h2 class="sec">DESCRIPTION</h2>
   <section class="body">
-    <p>一份生产级的代码审查技能。它把 AI 辅助的代码审查从模糊建议提升为结构化、一致、专业级的协作流程。</p>
-    <p>核心仅约 <span class="em">220 行</span>，按需调阅共计 <span class="em">21,000+ 行</span> 的语言指南。覆盖 <span class="em">20+ 种</span> 主流语言与框架——按需加载，零冗余。</p>
-    <p>每一条审查意见都带有明确的严重性标记。每一次审查都按四个阶段推进：从 PR 上下文 &middot; 高层级评估 &middot; 逐行分析 &middot; 总结决策。</p>
+    <p>A production-grade code review skill. It transforms AI-assisted code review from vague suggestions into a structured, consistent, expert-level collaborative process.</p>
+    <p>Core is only <span class="em">~280 lines</span>; the full <span class="em">16,000+ lines</span> of guides load on demand. Covers JavaScript, TypeScript, Node.js, NestJS, Python, and Salesforce (Apex, triggers, SOQL/SOSL, LWC, Aura, Visualforce, Flows, metadata) &mdash; progressive loading, zero overhead.</p>
+    <p>Every finding carries an explicit severity label. Every review proceeds through four phases: PR context &middot; high-level assessment &middot; line-by-line analysis &middot; summary &amp; decision.</p>
   </section>
 
   <!-- ═══ LANGUAGES ═══ -->
   <h2 class="sec">LANGUAGES</h2>
   <section class="body">
 
-    <div class="cat-head">┌── frontend ──┘</div>
-    <div class="lang-row"><span class="file">react.md</span><span class="desc">React 19, Hooks, Server Components, TanStack v5 <span class="dotleader">.................</span></span><span class="lines">870</span></div>
-    <div class="lang-row"><span class="file">vue.md</span><span class="desc">Vue 3.5, Composition API, Composables, Watchers <span class="dotleader">.................</span></span><span class="lines">920</span></div>
-    <div class="lang-row"><span class="file">angular.md</span><span class="desc">Angular 17+, Signals, Standalone, Zoneless <span class="dotleader">..........................</span></span><span class="lines">790</span></div>
-    <div class="lang-row"><span class="file">svelte.md</span><span class="desc">Svelte 5, Runes, SvelteKit, SSR/CSR boundaries <span class="dotleader">..................</span></span><span class="lines">1,060</span></div>
-    <div class="lang-row"><span class="file">typescript.md</span><span class="desc">TypeScript strict mode, generics, immutability <span class="dotleader">..................</span></span><span class="lines">1,020</span></div>
-    <div class="lang-row"><span class="file">css-less-sass.md</span><span class="desc">CSS/Less/Sass variables, responsive, compatibility <span class="dotleader">..............</span></span><span class="lines">660</span></div>
+    <div class="cat-head">┌── javascript / typescript ──┘</div>
+    <div class="lang-row"><span class="file">javascript.md</span><span class="desc">Shared base: semantics, async, DOM, tests <span class="dotleader">...................</span></span><span class="lines">1,290</span></div>
+    <div class="lang-row"><span class="file">typescript.md</span><span class="desc">Types, generics, strict mode, typed lint <span class="dotleader">....................</span></span><span class="lines">900</span></div>
+    <div class="lang-row"><span class="file">nodejs.md</span><span class="desc">Event loop, streams, shutdown, Express <span class="dotleader">......................</span></span><span class="lines">1,110</span></div>
+    <div class="lang-row"><span class="file">nestjs.md</span><span class="desc">DI, guards, interceptors, DTO validation <span class="dotleader">....................</span></span><span class="lines">660</span></div>
 
-    <div class="cat-head">┌── backend ──┘</div>
-    <div class="lang-row"><span class="file">python.md</span><span class="desc">Python async, typing, pytest, mutable defaults <span class="dotleader">.................</span></span><span class="lines">1,070</span></div>
-    <div class="lang-row"><span class="file">django.md</span><span class="desc">Django/DRF security, N+1, serializers, async views <span class="dotleader">..............</span></span><span class="lines">1,030</span></div>
-    <div class="lang-row"><span class="file">java.md</span><span class="desc">Java 17/21, Spring Boot 3, virtual threads, JPA <span class="dotleader">................</span></span><span class="lines">410</span></div>
-    <div class="lang-row"><span class="file">php.md</span><span class="desc">PHP 8.x, types, PDO, security, Composer <span class="dotleader">...........................</span></span><span class="lines">700</span></div>
-    <div class="lang-row"><span class="file">go.md</span><span class="desc">Goroutines, channels, context, interface design <span class="dotleader">.................</span></span><span class="lines">990</span></div>
-    <div class="lang-row"><span class="file">rust.md</span><span class="desc">Ownership, async/await, unsafe, cancellation safety <span class="dotleader">.............</span></span><span class="lines">840</span></div>
-    <div class="lang-row"><span class="file">csharp.md</span><span class="desc">C# 12 / .NET 8, EF Core, ASP.NET Core, LINQ <span class="dotleader">.....................</span></span><span class="lines">520</span></div>
-    <div class="lang-row"><span class="file">nestjs.md</span><span class="desc">NestJS DI, guards, interceptors, DTO validation <span class="dotleader">.................</span></span><span class="lines">590</span></div>
-    <div class="lang-row"><span class="file">fastapi.md</span><span class="desc">FastAPI Depends, Pydantic v2, async, test-driven verification <span class="dotleader">........</span></span><span class="lines">590</span></div>
+    <div class="cat-head">┌── python ──┘</div>
+    <div class="lang-row"><span class="file">python.md</span><span class="desc">Typing, asyncio, exceptions, pytest <span class="dotleader">.........................</span></span><span class="lines">1,080</span></div>
 
-    <div class="cat-head">┌── mobile / systems ──┘</div>
-    <div class="lang-row"><span class="file">kotlin.md</span><span class="desc">Kotlin/Android coroutines, Compose, Flow, null safety <span class="dotleader">...........</span></span><span class="lines">1,020</span></div>
-    <div class="lang-row"><span class="file">swift.md</span><span class="desc">Swift 5.9+/6, SwiftUI, concurrency, Sendable, optionals <span class="dotleader">..........</span></span><span class="lines">930</span></div>
-    <div class="lang-row"><span class="file">dart.md</span><span class="desc">Dart/Flutter rebuilds, const, null safety, isolates, state <span class="dotleader">.........</span></span><span class="lines">650</span></div>
-    <div class="lang-row"><span class="file">c.md</span><span class="desc">C pointer safety, UB, secure coding, portability, testing <span class="dotleader">.....</span></span><span class="lines">890</span></div>
-    <div class="lang-row"><span class="file">cpp.md</span><span class="desc">C++ RAII, smart pointers, C++20/23, constexpr, testing <span class="dotleader">........</span></span><span class="lines">890</span></div>
-    <div class="lang-row"><span class="file">qt.md</span><span class="desc">Qt object model, Model/View, QML, Qt6 migration, testing <span class="dotleader">.......</span></span><span class="lines">760</span></div>
+    <div class="cat-head">┌── salesforce ──┘</div>
+    <div class="lang-row"><span class="file">platform.md</span><span class="desc">Load first: limits, security, severity <span class="dotleader">......................</span></span><span class="lines">660</span></div>
+    <div class="lang-row"><span class="file">apex.md</span><span class="desc">Bulkification, user mode, async, tests <span class="dotleader">......................</span></span><span class="lines">1,270</span></div>
+    <div class="lang-row"><span class="file">apex-triggers.md</span><span class="desc">Handlers, 200-record chunks, recursion <span class="dotleader">......................</span></span><span class="lines">560</span></div>
+    <div class="lang-row"><span class="file">soql-sosl.md</span><span class="desc">Injection, USER_MODE, selectivity <span class="dotleader">...........................</span></span><span class="lines">550</span></div>
+    <div class="lang-row"><span class="file">lwc.md</span><span class="desc">Reactivity, LDS/wire, Apex contract, LWS <span class="dotleader">....................</span></span><span class="lines">930</span></div>
+    <div class="lang-row"><span class="file">aura.md</span><span class="desc">Server actions, events, security, migration <span class="dotleader">.................</span></span><span class="lines">460</span></div>
+    <div class="lang-row"><span class="file">visualforce.md</span><span class="desc">Encoding, CSRF, controllers, view state <span class="dotleader">.....................</span></span><span class="lines">500</span></div>
+    <div class="lang-row"><span class="file">flows.md</span><span class="desc">Flow types, entry criteria, bulk, faults <span class="dotleader">....................</span></span><span class="lines">740</span></div>
+    <div class="lang-row"><span class="file">metadata.md</span><span class="desc">Permissions, sharing, schema, deploys <span class="dotleader">.......................</span></span><span class="lines">780</span></div>
 
     <div class="cat-head">┌── cross-cutting ──┘</div>
-    <div class="lang-row"><span class="file">architecture-review-guide.md</span><span class="desc">SOLID, anti-patterns, coupling <span class="dotleader">...</span></span><span class="lines">470</span></div>
-    <div class="lang-row"><span class="file">performance-review-guide.md</span><span class="desc">Web Vitals, N+1, complexity <span class="dotleader">.......</span></span><span class="lines">820</span></div>
-    <div class="lang-row"><span class="file">code-quality-universal.md</span><span class="desc">TOCTOU, leaky abstractions, sprawl <span class="dotleader">....</span></span><span class="lines">490</span></div>
-    <div class="lang-row"><span class="file">security-review-guide.md</span><span class="desc">Injection, XSS, secrets, all langs <span class="dotleader">.....</span></span><span class="lines">640</span></div>
-    <div class="lang-row"><span class="file">common-bugs-checklist.md</span><span class="desc">Language-specific bug patterns, pitfalls <span class="dotleader">.........</span></span><span class="lines">250</span></div>
-    <div class="lang-row"><span class="file">code-review-best-practices.md</span><span class="desc">Communication, process, reviewer guidelines <span class="dotleader">.......</span></span><span class="lines">140</span></div>
-    <div class="lang-row"><span class="file">sql-injection-prevention.md</span><span class="desc">Parameterized queries, ORM safety, 6 languages <span class="dotleader">......</span></span><span class="lines">310</span></div>
-    <div class="lang-row"><span class="file">xss-prevention.md</span><span class="desc">Output encoding, CSP, 5 frameworks, detection <span class="dotleader">.........</span></span><span class="lines">260</span></div>
-    <div class="lang-row"><span class="file">n-plus-one-queries.md</span><span class="desc">N+1 detection, eager loading, batch fetching <span class="dotleader">...........</span></span><span class="lines">310</span></div>
-    <div class="lang-row"><span class="file">error-handling-principles.md</span><span class="desc">Error wrapping, context, sentinel errors <span class="dotleader">..............</span></span><span class="lines">490</span></div>
-    <div class="lang-row"><span class="file">async-concurrency-patterns.md</span><span class="desc">Coroutines, channels, cancellation, timeouts <span class="dotleader">..........</span></span><span class="lines">540</span></div>
+    <div class="lang-row"><span class="file">architecture-review-guide.md</span><span class="desc">SOLID, anti-patterns, coupling, SF layering <span class="dotleader">.................</span></span><span class="lines">550</span></div>
+    <div class="lang-row"><span class="file">performance-review-guide.md</span><span class="desc">Web Vitals, N+1, complexity, governor limits <span class="dotleader">................</span></span><span class="lines">940</span></div>
+    <div class="lang-row"><span class="file">code-quality-universal.md</span><span class="desc">TOCTOU, leaky abstractions, sprawl <span class="dotleader">..........................</span></span><span class="lines">510</span></div>
+    <div class="lang-row"><span class="file">security-review-guide.md</span><span class="desc">Injection, XSS, secrets, CRUD/FLS <span class="dotleader">...........................</span></span><span class="lines">540</span></div>
+    <div class="lang-row"><span class="file">common-bugs-checklist.md</span><span class="desc">Stack-specific bug patterns, pitfalls <span class="dotleader">.......................</span></span><span class="lines">190</span></div>
+    <div class="lang-row"><span class="file">code-review-best-practices.md</span><span class="desc">Communication, process, reviewer guidelines <span class="dotleader">.................</span></span><span class="lines">140</span></div>
+    <div class="lang-row"><span class="file">sql-injection-prevention.md</span><span class="desc">Parameterized queries: Python, Node.js, Apex <span class="dotleader">................</span></span><span class="lines">270</span></div>
+    <div class="lang-row"><span class="file">xss-prevention.md</span><span class="desc">Output encoding, CSP, DOM, LWC/Aura/VF <span class="dotleader">......................</span></span><span class="lines">280</span></div>
+    <div class="lang-row"><span class="file">n-plus-one-queries.md</span><span class="desc">Eager loading, DataLoader, SOQL in loops <span class="dotleader">....................</span></span><span class="lines">380</span></div>
+    <div class="lang-row"><span class="file">error-handling-principles.md</span><span class="desc">Context, hierarchy, cause chains, logging <span class="dotleader">...................</span></span><span class="lines">520</span></div>
+    <div class="lang-row"><span class="file">async-concurrency-patterns.md</span><span class="desc">Cancellation, backpressure, async Apex <span class="dotleader">......................</span></span><span class="lines">540</span></div>
   </section>
 
   <!-- ═══ PHASES ═══ -->
@@ -517,13 +489,13 @@
 
     <dl class="phase-list" style="margin-top:1.5rem;">
       <dt>1. context gathering <span class="dim">— 2-3 min</span></dt>
-      <dd>读 PR 描述与关联 issue，评估规模，检查 CI 状态，理解业务需求。</dd>
+      <dd>Read the PR description and linked issues, assess scope, check CI status, understand the business intent.</dd>
       <dt>2. high-level review <span class="dim">— 5-10 min</span></dt>
-      <dd>评估架构合理性、性能影响面、文件组织、测试策略。先看全局。</dd>
+      <dd>Evaluate architectural fit, performance impact, file organization, test strategy. See the whole first.</dd>
       <dt>3. line-by-line analysis <span class="dim">— 10-20 min</span></dt>
-      <dd>逻辑正确性 &middot; 安全 &middot; 性能 &middot; 可维护性 &middot; 边界情况。一一过目。</dd>
+      <dd>Logic correctness &middot; security &middot; performance &middot; maintainability &middot; edge cases. One by one.</dd>
       <dt>4. summary &amp; decision <span class="dim">— 2-3 min</span></dt>
-      <dd>汇总问题，表扬亮点，给出 approve / comment / request-changes。</dd>
+      <dd>Summarize findings, name what was done well, deliver approve / comment / request-changes.</dd>
     </dl>
   </section>
 
@@ -533,27 +505,27 @@
     <ul class="sev-list">
       <li>
         <span class="label"><span class="red">●</span>&nbsp;[blocking]</span>
-        <span class="desc">必须修复 <span class="aside">— 合并前解决；安全漏洞 / 数据正确性 / 严重逻辑</span></span>
+        <span class="desc">must fix <span class="aside">— resolve before merge; security / correctness / serious logic</span></span>
       </li>
       <li>
-        <span class="label"><span style="color:#d68a3d;">●</span>&nbsp;[important]</span>
-        <span class="desc">应当修复 <span class="aside">— 强烈建议；有分歧应讨论</span></span>
+        <span class="label"><span style="color:#c7a648;">●</span>&nbsp;[important]</span>
+        <span class="desc">should fix <span class="aside">— strongly recommended; discuss if you disagree</span></span>
       </li>
       <li>
-        <span class="label"><span style="color:#c7a648;">●</span>&nbsp;[nit]</span>
-        <span class="desc">细节建议 <span class="aside">— 风格或偏好，不阻塞合并</span></span>
+        <span class="label"><span class="green">●</span>&nbsp;[nit]</span>
+        <span class="desc">nice to have <span class="aside">— style or preference; non-blocking</span></span>
       </li>
       <li>
         <span class="label"><span class="blue">●</span>&nbsp;[suggestion]</span>
-        <span class="desc">可选优化 <span class="aside">— 替代方案，由作者决定</span></span>
+        <span class="desc">alternative <span class="aside">— worth considering; author decides</span></span>
       </li>
       <li>
         <span class="label"><span style="color:#9078b8;">●</span>&nbsp;[learning]</span>
-        <span class="desc">知识分享 <span class="aside">— 教育性说明，无需采取行动</span></span>
+        <span class="desc">educational <span class="aside">— no action needed; share knowledge</span></span>
       </li>
       <li>
-        <span class="label"><span class="green">●</span>&nbsp;[praise]</span>
-        <span class="desc">表扬肯定 <span class="aside">— 看到好代码就说出来</span></span>
+        <span class="label"><span style="color:#d68a3d;">●</span>&nbsp;[praise]</span>
+        <span class="desc">good work <span class="aside">— say it out loud when you see it</span></span>
       </li>
     </ul>
   </section>
@@ -562,17 +534,17 @@
   <h2 class="sec">INSTALLATION</h2>
   <section class="body">
 
-    <p>用 <span class="em">npx skills</span> 安装到主流 Agent，或克隆到 Claude Code skills 目录。</p>
+    <p>Install with <span class="em">npx skills</span> for mainstream agents, or clone into the Claude Code skills directory.</p>
 
-<pre class="codeblock"><span class="cmt"># npx skills（Cursor / Claude Code / Codex / OpenCode 等）</span>
-<span class="prompt">$</span> <span class="cmd">npx skills add</span> <span class="arg">awesome-skills/code-review-skill</span> --skill code-review-skill
+<pre class="codeblock"><span class="cmt"># npx skills (Cursor / Claude Code / Codex / OpenCode / others)</span>
+<span class="prompt">$</span> <span class="cmd">npx skills add</span> <span class="arg">&lt;owner&gt;/&lt;repo&gt;</span> --skill code-review-skill
 
-<span class="cmt"># 或克隆到 Claude Code skills 目录 — macOS / Linux</span>
-<span class="prompt">$</span> <span class="cmd">git clone</span> <span class="arg">https://github.com/awesome-skills/code-review-skill.git</span> \
+<span class="cmt"># or clone into the Claude Code skills directory — macOS / Linux</span>
+<span class="prompt">$</span> <span class="cmd">git clone</span> <span class="arg">&lt;repository-url&gt;</span> \
     ~/.claude/skills/code-review-skill
 
 <span class="cmt"># Windows PowerShell</span>
-<span class="prompt">PS&gt;</span> <span class="cmd">git clone</span> <span class="arg">https://github.com/awesome-skills/code-review-skill.git</span> `
+<span class="prompt">PS&gt;</span> <span class="cmd">git clone</span> <span class="arg">&lt;repository-url&gt;</span> `
        "$env:USERPROFILE\.claude\skills\code-review-skill"</pre>
   </section>
 
@@ -582,19 +554,23 @@
     <ul class="examples">
       <li>
         <span class="q">Use code-review-skill to review this PR</span>
-        <span class="note">激活完整四阶段流程</span>
+        <span class="note">runs the full four-phase review</span>
       </li>
       <li>
-        <span class="q">Review this React component</span>
-        <span class="note">加载 react.md &middot; 检查 Hooks &middot; Server Components</span>
+        <span class="q">Review this Apex trigger</span>
+        <span class="note">loads salesforce/platform.md + apex-triggers.md + apex.md &middot; bulk safety &middot; recursion</span>
       </li>
       <li>
-        <span class="q">Security review of this Go service</span>
-        <span class="note">同时加载 go.md + security-review-guide.md</span>
+        <span class="q">Review this Lightning Web Component</span>
+        <span class="note">loads salesforce/lwc.md + javascript.md &middot; Apex contract &middot; XSS &middot; cleanup</span>
+      </li>
+      <li>
+        <span class="q">Security review of this Node.js service</span>
+        <span class="note">loads nodejs.md + javascript.md + security-review-guide.md</span>
       </li>
       <li>
         <span class="q">Architecture review</span>
-        <span class="note">加载架构指南 &middot; SOLID &middot; 反模式 &middot; 耦合度</span>
+        <span class="note">loads the architecture guide &middot; SOLID &middot; anti-patterns &middot; coupling</span>
       </li>
     </ul>
   </section>
@@ -604,17 +580,20 @@
   <section class="body">
 <pre class="tree">
 <span class="dir">~/.claude/skills/code-review-skill/</span>
-<span class="branch">├──</span> <span class="file">SKILL.md</span>                              <span class="cmt"># 核心，激活时加载 (~220 行)</span>
+<span class="branch">├──</span> <span class="file">SKILL.md</span>                              <span class="cmt"># core, loaded on activation (~280 lines)</span>
 <span class="branch">├──</span> <span class="file">README.md</span>
-<span class="branch">├──</span> <span class="file">LICENSE</span>                               <span class="cmt"># MIT</span>
-<span class="branch">├──</span> <span class="dir">reference/</span>                            <span class="cmt"># 按需加载的语言指南</span>
-<span class="branch">│   ├──</span> <span class="file">react.md</span> <span class="file">vue.md</span> <span class="file">angular.md</span> ...
+<span class="branch">├──</span> <span class="file">index.html</span>                            <span class="cmt"># this page</span>
+<span class="branch">├──</span> <span class="dir">reference/</span>                            <span class="cmt"># on-demand guides</span>
+<span class="branch">│   ├──</span> <span class="file">javascript.md</span> <span class="file">typescript.md</span> <span class="file">nodejs.md</span> <span class="file">nestjs.md</span> <span class="file">python.md</span>
+<span class="branch">│   ├──</span> <span class="dir">salesforce/</span>                       <span class="cmt"># platform, apex, triggers, soql, lwc, aura, vf, flows, metadata</span>
+<span class="branch">│   ├──</span> <span class="dir">cross-cutting/</span>                    <span class="cmt"># sql injection, xss, n+1, errors, async</span>
 <span class="branch">│   └──</span> <span class="file">architecture-review-guide.md</span> ...
 <span class="branch">├──</span> <span class="dir">assets/</span>
-<span class="branch">│   ├──</span> <span class="file">review-checklist.md</span>              <span class="cmt"># 快速参考</span>
-<span class="branch">│   └──</span> <span class="file">pr-review-template.md</span>            <span class="cmt"># 评论模板</span>
+<span class="branch">│   ├──</span> <span class="file">review-checklist.md</span>              <span class="cmt"># quick reference</span>
+<span class="branch">│   └──</span> <span class="file">pr-review-template.md</span>            <span class="cmt"># PR comment template</span>
 <span class="branch">└──</span> <span class="dir">scripts/</span>
-    <span class="branch">└──</span> <span class="file">pr-analyzer.py</span>                   <span class="cmt"># PR 复杂度分析</span></pre>
+    <span class="branch">├──</span> <span class="file">pr-analyzer.py</span>                   <span class="cmt"># PR triage, Salesforce-aware</span>
+    <span class="branch">└──</span> <span class="file">test_pr_analyzer.py</span></pre>
   </section>
 
   <!-- ═══ SEE ALSO ═══ -->
@@ -622,9 +601,10 @@
   <section class="body">
     <p>
       <a class="link" href="https://claude.ai/code" target="_blank">claude-code(1)</a>,
-      <a class="link" href="https://github.com/awesome-skills/code-review-skill" target="_blank">github / awesome-skills</a>,
-      <a class="link" href="https://github.com/awesome-skills/code-review-skill/blob/main/CONTRIBUTING.md" target="_blank">CONTRIBUTING(7)</a>,
-      <a class="link" href="https://github.com/awesome-skills/code-review-skill/blob/main/assets/review-checklist.md" target="_blank">review-checklist(7)</a>
+      <a class="link" href="README.md">README</a>,
+      <a class="link" href="SKILL.md">SKILL(7)</a>,
+      <a class="link" href="assets/review-checklist.md">review-checklist(7)</a>,
+      <a class="link" href="https://github.com/awesome-skills/code-review-skill" target="_blank">upstream: awesome-skills/code-review-skill</a>
     </p>
   </section>
 
@@ -635,7 +615,7 @@
       <dt>awesome-skills</dt>
       <dd>maintainer, primary author</dd>
       <dt>contributors</dt>
-      <dd>see <a class="link" href="https://github.com/awesome-skills/code-review-skill/graphs/contributors" target="_blank">graphs/contributors</a></dd>
+      <dd>see upstream <a class="link" href="https://github.com/awesome-skills/code-review-skill/graphs/contributors" target="_blank">graphs/contributors</a></dd>
     </dl>
   </section>
 

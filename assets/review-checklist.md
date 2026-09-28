@@ -43,6 +43,21 @@ Quick reference checklist for code reviews.
 - [ ] No memory leaks
 - [ ] Caching considered where appropriate
 
+## Salesforce (5 min)
+
+For changes to Apex, LWC, Aura, Visualforce, flows, or metadata.
+
+- [ ] Static review only: no deploys, Apex runs, or test runs against an org
+- [ ] Bulk-safe at 200 records per trigger chunk
+- [ ] No SOQL, DML, or callouts inside loops
+- [ ] Sharing and CRUD/FLS correct for the file's `apiVersion`
+- [ ] Tests cover bulk, negative, and `System.runAs` cases, with asserts
+- [ ] New fields have FLS granted; permission sets follow least privilege
+- [ ] No hard-coded record Ids or URLs
+- [ ] Flows have entry conditions and fault paths
+
+> See [Salesforce Platform Guide](../reference/salesforce/platform.md).
+
 ## Testing (5 min)
 
 - [ ] Tests exist for new code
@@ -87,6 +102,7 @@ Quick reference checklist for code reviews.
 |-----------|----------|
 | Critical security issue | 🔴 Block, fix immediately |
 | Breaking change without migration | 🔴 Block |
+| Governor-limit failure at bulk volume | 🔴 Block |
 | Missing error handling | 🟡 Should fix |
 | No tests for new code | 🟡 Should fix |
 | Style preference | 🟢 Non-blocking |
@@ -116,8 +132,13 @@ Watch for these patterns:
 - Commented out code
 - `any` type in TypeScript
 - Empty catch blocks
-- `unwrap()` in Rust production code
+- Un-awaited (floating) promises in JavaScript/TypeScript
 - Magic numbers/strings
 - Copy-pasted code blocks
 - Missing null checks
 - Hardcoded URLs/credentials
+- SOQL/DML inside loops
+- Unjustified `without sharing` / `WITH SYSTEM_MODE`
+- Hard-coded record Ids
+- Visualforce `escape="false"`
+- `SeeAllData=true` in tests
