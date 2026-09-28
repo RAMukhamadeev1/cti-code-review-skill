@@ -1,164 +1,35 @@
-# PR Review Template
+# Example Review
 
-Copy and use this template for your code reviews.
+A complete review in the [Output Format](../SKILL.md#output-format). The fixed parts are:
 
----
+- the verdict and scope lines;
+- numbered findings, each with severity, `path:line`, the defect stated as fact, its impact and a fix;
+- questions for what a static review can't settle.
 
-## Summary
+Everything else varies with the change.
 
-[Brief overview of what was reviewed - 1-2 sentences]
+## The review
 
-**PR Size:** [Small/Medium/Large] (~X lines)
-**Review Time:** [X minutes]
+**Verdict:** Request changes — the invoice trigger fails at bulk volume, and the export route trusts a client-supplied account Id.
+**Scope:** origin/main...feature/invoice-sync · 7 files (+214/−38) · guides: platform, apex, apex-triggers, soql-sosl, javascript, typescript, nodejs · not reviewed: package-lock.json (generated)
 
-## Strengths
+### Findings
 
-- [What was done well]
-- [Good patterns or approaches used]
-- [Improvements from previous code]
+1. 🔴 [blocking] `force-app/main/default/classes/InvoiceTriggerHandler.cls:41` — `[SELECT … FROM Account WHERE Id = :inv.Account__c]` runs once per invoice inside the loop.
+   - Impact: a 200-record insert runs 200 queries in one trigger chunk → `System.LimitException: Too many SOQL queries: 101`, and the whole data load fails.
+   - Fix: collect the `Account__c` Ids before the loop, query once into a `Map<Id, Account>`, and read from the map inside the loop.
+2. 🔴 [blocking] `src/routes/export.ts:27` — `accountId` comes from `req.query` and goes straight to `exportService.run(accountId)` with no ownership check.
+   - Impact: any signed-in user can export another customer's invoices by changing the query string (IDOR).
+   - Fix: load the account with `where: { id: accountId, ownerId: req.user.id }` and return 404 when nothing matches.
+   - Also at: `src/routes/export.ts:61` (the CSV variant)
+3. 🟡 [important] `force-app/main/default/classes/InvoiceSyncJob.cls:18` — the callout response is parsed without checking `res.getStatusCode()`.
+   - Impact: a 500 from the billing API deserializes to an empty list, and the job marks every invoice as synced.
+   - Fix: record a failure (or throw `CalloutException`) unless the status is 200, before parsing.
+4. 🟡 [important] `force-app/main/default/classes/BillingClient.cls:55` (pre-existing, now called from the new job) — the request sets no timeout.
+   - Impact: the default 10-second timeout is shorter than the billing API's documented 30-second export time, so large syncs fail intermittently.
+   - Fix: `req.setTimeout(30000);`
+5. 🟢 [nit] `src/services/export.service.ts:12` — `let rows` is never reassigned; `const` states the intent.
 
-## Architecture & Performance
+### Questions
 
-**Architecture Assessment**
-- [ ] Separation of concerns — are responsibilities clearly divided?
-- [ ] Module responsibilities — does each module have a single purpose?
-- [ ] Dependency direction — do dependencies flow toward stability?
-- [ ] Consistent with existing patterns and conventions
-
-> See [Architecture Review Guide](../reference/architecture-review-guide.md) for detailed SOLID, anti-pattern, and coupling analysis.
-
-**Performance Assessment**
-- [ ] Algorithm complexity — any O(n²) or worse on large inputs?
-- [ ] Memory impact — large allocations, leaks, unbounded growth?
-- [ ] I/O impact — excessive API calls, unbatched writes, missing caching?
-- [ ] Database queries — N+1 risks, missing indexes, unoptimized joins?
-
-> See [Performance Review Guide](../reference/performance-review-guide.md) for comprehensive Web Vitals, N+1, and caching guidance.
-
-## Required Changes
-
-🔴 **[blocking]** [Issue description]
-> [Code location or example]
-> [Suggested fix or explanation]
-
-🔴 **[blocking]** [Issue description]
-> [Details]
-
-## Important Suggestions
-
-🟡 **[important]** [Issue description]
-> [Why this matters]
-> [Suggested approach]
-
-## Minor Suggestions
-
-🟢 **[nit]** [Minor improvement suggestion]
-
-💡 **[suggestion]** [Alternative approach to consider]
-
-## Learning Notes
-
-📚 [Educational context worth sharing about X]
-
-📚 [Background behind design decision Y]
-
-## Security Considerations
-
-- [ ] No hardcoded secrets
-- [ ] Input validation present
-- [ ] Authorization checks in place
-- [ ] No SQL/XSS injection risks
-- [ ] CSRF protection for state-changing operations
-- [ ] Sensitive data not leaked in logs/errors
-- [ ] Dependency vulnerabilities checked (npm audit / pip-audit)
-
-> See [Security Review Guide](../reference/security-review-guide.md) for comprehensive injection, XSS, CSRF, secrets, and auth checklist.
-
-## Salesforce Considerations
-
-[Include when the PR touches Salesforce code or metadata; delete otherwise.]
-
-- [ ] Static review only: no org commands were run (no deploys, Apex or test runs, or data queries)
-- [ ] Bulk and limit reasoning at 200+ records (SOQL, DML, callouts, and CPU time per transaction)
-- [ ] Sharing, CRUD, and FLS correct for each file's `apiVersion`
-- [ ] Tests cover bulk, negative, and `System.runAs` cases, with asserts and callout mocks
-- [ ] Metadata and deployment impact checked: FLS for new fields, destructive changes, flow activation, manifests
-- [ ] Automation overlap checked: triggers, flows, and validation rules on the same object
-
-> See [Salesforce Platform Guide](../reference/salesforce/platform.md).
-
-## Test Coverage
-
-- [ ] Unit tests added/updated
-- [ ] Edge cases covered
-- [ ] Error cases tested
-
-## Verdict
-
-**[ ] ✅ Approve** - Ready to merge
-**[ ] 💬 Comment** - Minor suggestions, can merge
-**[ ] 🔄 Request Changes** - Must address blocking issues
-
----
-
-## Quick Copy Templates
-
-### Blocking Issue
-```
-🔴 **[blocking]** [Title]
-
-[Description of the issue]
-
-**Location:** `file.ts:123`
-
-**Suggested fix:**
-\`\`\`typescript
-// Your suggested code
-\`\`\`
-```
-
-### Blocking Issue (Salesforce)
-```
-🔴 **[blocking]** [Title, for example "SOQL query inside a loop"]
-
-[Description with the limit math, for example "200 records in one trigger chunk → 200 queries → System.LimitException"]
-
-**Location:** `force-app/main/default/classes/AccountService.cls:42`
-
-**Suggested fix:**
-\`\`\`apex
-// Your suggested code
-\`\`\`
-```
-
-### Important Suggestion
-```
-🟡 **[important]** [Title]
-
-[Why this is important]
-
-**Consider:**
-- Option A: [description]
-- Option B: [description]
-```
-
-### Minor Suggestion
-```
-🟢 **[nit]** [Suggestion]
-
-Not blocking, but consider [improvement].
-```
-
-### Praise
-```
-🎉 **[praise]** Great work on [specific thing]!
-
-[Why this is good]
-```
-
-### Learning
-```
-📚 **[learning]** [Educational note]
-
-For context, [X] works this way because [Y]. No action needed — just sharing.
-```
+- `force-app/main/default/triggers/InvoiceTrigger.trigger-meta.xml:4` — the apiVersion moves from 62.0 to 67.0, so the query in the trigger body now runs in user mode. Can the integration user read `Account.Credit_Limit__c`? If unsure, ask for a test run as that user in the sandbox.

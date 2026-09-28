@@ -1,540 +1,266 @@
 # Security Review Guide
 
-Security-focused code review checklist based on the OWASP Top 10 and best practices, with examples for JavaScript/TypeScript (browser and Node.js), Python, and Salesforce.
+Index of security review rules for JavaScript/TypeScript, Python, and Salesforce: each attack type gets a short rule, its legitimate exceptions, and a link to the guide that owns the detail.
+
+Related: [SQL Injection](cross-cutting/sql-injection-prevention.md) · [XSS](cross-cutting/xss-prevention.md) · [Error Handling](cross-cutting/error-handling-principles.md) · [Salesforce Security Model](salesforce/platform.md#security-model)
+
+## Review Checklist
+
+Read this checklist first; open a section only when the diff contains its pattern.
+
+Severity: 🔴 blocking · 🟡 important · 🟢 nit · 💡 suggestion ([how to pick](#severity)). Pre-existing code is not a finding unless the change makes it worse.
+
+### Identity → [Authentication & Authorization](#authentication--authorization)
+
+- [ ] 🔴 New endpoints check authorization on the server and scope queries to the caller ([IDOR](#idor-insecure-direct-object-reference))
+- [ ] 🔴 Passwords use Argon2id, scrypt, bcrypt, or PBKDF2 at current work factors, never a plain or fast hash
+- [ ] 🟡 Password rules follow NIST SP 800-63B-4: length and a breached-password check, no composition rules or forced rotation
+- [ ] 🔴 JWTs are verified with pinned algorithms ([JWT](#jwt-security)); tokens come from a CSPRNG
+
+### Injection → [Input Validation](#input-validation)
+
+- [ ] 🔴 SQL and SOQL bind every value; identifiers come from allowlists ([SQL Injection](cross-cutting/sql-injection-prevention.md))
+- [ ] 🔴 HTML output is auto-escaped or sanitized; template source never comes from input ([XSS](cross-cutting/xss-prevention.md))
+- [ ] 🔴 No shell parses user input ([Command Injection](#command-injection-prevention))
+- [ ] 🔴 Fetches of caller-supplied URLs pass an exact allowlist and refuse redirects ([SSRF](#ssrf-prevention))
+- [ ] 🔴 No deserialization of untrusted data; user paths stay inside their base directory ([Deserialization & Paths](#deserialization--file-paths))
+
+### Browser boundaries → [CSRF Prevention](#csrf-prevention)
+
+- [ ] 🔴 Cookie-authenticated state changes check a CSRF token, a custom header, or `Sec-Fetch-Site`; bearer-token APIs need none
+- [ ] 🟡 Credentialed CORS names exact origins; `*` on public, unauthenticated data is fine ([CORS](#cors-configuration))
+- [ ] 🟡 A new or changed CSP follows [XSS: CSP](cross-cutting/xss-prevention.md#content-security-policy-csp)
+
+### Data → [Data Protection](#data-protection)
+
+- [ ] 🔴 No secrets in code, config, fixtures, images, or logs
+- [ ] 🟡 Clients get safe error messages ([Error Messages](#error-messages)); logs carry IDs, not credentials or PII ([Secure Logging](#secure-logging))
+- [ ] 🟡 Encryption is AEAD with unique nonces; no custom crypto ([Cryptography](#cryptography))
+- [ ] 🟡 When the PR touches manifests or lockfiles: lockfile updated, new packages justified ([Dependencies](#dependency-security))
+
+### Salesforce → [Salesforce Platform Security](#salesforce-platform-security)
+
+- [ ] 🔴 Entry points enforce sharing, CRUD, and FLS for their API version and re-query client-supplied Ids in user mode
 
 ## Authentication & Authorization
 
-### Authentication
-- [ ] Passwords hashed with strong algorithm (bcrypt, argon2)
-- [ ] Password complexity requirements enforced
-- [ ] Account lockout after failed attempts
-- [ ] Secure password reset flow
-- [ ] Multi-factor authentication for sensitive operations
-- [ ] Session tokens are cryptographically random
-- [ ] Session timeout implemented
-
-### Authorization
-- [ ] Authorization checks on every request
-- [ ] Principle of least privilege applied
-- [ ] Role-based access control (RBAC) properly implemented
-- [ ] No privilege escalation paths
-- [ ] Direct object reference checks (IDOR prevention)
-- [ ] API endpoints protected appropriately
+- Passwords (NIST SP 800-63B-4): ≥15 characters single-factor (8 with MFA), allow ≥64, blocklist check, no composition rules or periodic changes, rate-limited failures instead of hard lockout.
+- Hashing (OWASP): Argon2id (m=19 MiB, t=2, p=1) > scrypt (N=2^17, r=8, p=1) > bcrypt (cost ≥10, 72-byte limit) > PBKDF2-HMAC-SHA256 at 600,000 iterations for FIPS. Stronger defaults (argon2-cffi `PasswordHasher()`, Django's PBKDF2 hasher) are not findings.
+- Sessions: CSPRNG IDs, a new ID at login, idle and absolute timeouts. Authorization runs on the server per object and tenant; hiding a button is UX.
 
 ### JWT Security
+
 ```typescript
-// ❌ Insecure JWT configuration
-jwt.sign(payload, 'weak-secret');
+// ❌ Decoding is not verifying
+const claims = jwt.decode(token);
 
-// ✅ Secure JWT configuration (RS256 signs with a private key loaded from a secret manager)
-jwt.sign(payload, privateKey, {
-  algorithm: 'RS256',
-  expiresIn: '15m',
-  issuer: 'your-app',
-  audience: 'your-api'
-});
-
-// ❌ Not verifying JWT properly
-const decoded = jwt.decode(token);  // No signature verification!
-
-// ✅ Verify signature and claims
-const decoded = jwt.verify(token, publicKey, {
-  algorithms: ['RS256'],
-  issuer: 'your-app',
-  audience: 'your-api'
-});
+// ✅ Verify the signature with a pinned algorithm and check the claims
+const claims = jwt.verify(token, publicKey, { algorithms: ['RS256'], issuer: 'your-app', audience: 'your-api' });
 ```
+
+PyJWT: `jwt.decode(token, key, algorithms=["RS256"], audience=..., issuer=...)`; `options={"verify_signature": False}` outside tests is 🔴. HS256 with a strong managed secret is fine; flag hard-coded or short secrets and missing `exp`.
 
 ## Input Validation
 
 ### SQL Injection Prevention
 
-**The #1 rule**: Always use parameterized queries. Never concatenate user input into SQL strings.
-
-Every major language and framework has a parameterized query mechanism:
-- Python: `cursor.execute("SELECT ...", params)` / ORM filter methods
-- Node.js: `client.query("SELECT ...", [args])` / Prisma ORM
-- Salesforce Apex: static SOQL with bind variables (`WHERE Name = :name`) / `Database.queryWithBinds(query, binds, AccessLevel.USER_MODE)` for dynamic SOQL (API 57.0+). See [SQL Injection Prevention](cross-cutting/sql-injection-prevention.md#salesforce-apex-soqlsosl).
-
-> **See [SQL Injection Prevention Guide](cross-cutting/sql-injection-prevention.md) for complete cross-language examples, ORM unsafe patterns, dynamic identifier handling, and detection tools.**
+Bind every value and take identifiers from an allowlist. Raw-SQL escape hatches, placeholders, t-strings, Django, and Apex: [SQL Injection Prevention](cross-cutting/sql-injection-prevention.md).
 
 ### XSS Prevention
 
-**The #1 rule**: Rely on template and DOM auto-escaping. Audit every escape hatch.
-
-Most templates escape by default, and text-only DOM APIs never parse HTML. Audit the escape hatches:
-- Plain DOM: `textContent` is safe. Audit `innerHTML`, `outerHTML`, `insertAdjacentHTML`, and `document.write`.
-- Node.js templates: audit raw output, such as EJS `<%- %>`, Handlebars `{{{ }}}`, and Pug `!{}`.
-- Python (Jinja2): a bare `Environment()` doesn't escape, so enable `autoescape` (for example `select_autoescape()`). Audit `|safe` and `markupsafe.Markup()` around untrusted data.
-- Salesforce: audit Visualforce `escape="false"` and merge fields inside `<script>` without `JSENCODE`, Aura `<aura:unescapedHtml>`, and LWC `lwc:dom="manual"` combined with `innerHTML`. See [XSS Prevention](cross-cutting/xss-prevention.md#salesforce-lwc-aura-visualforce).
-
-For defense-in-depth, configure Content Security Policy (CSP) with nonce-based `script-src`.
-
-> **See [XSS Prevention Guide](cross-cutting/xss-prevention.md) for examples by technology, CSP configuration, input validation vs output encoding, and detection tools.**
+Rely on auto-escaping and audit every escape hatch (`innerHTML`, `dangerouslySetInnerHTML`, `v-html`, `|safe`, `mark_safe`, `escape="false"`). Template source built from input is template injection, which executes code. Details: [XSS Prevention](cross-cutting/xss-prevention.md).
 
 ### CSRF Prevention
 
-**CSRF Token Implementation**
-```typescript
-// ✅ Server: generate and validate CSRF token
-import crypto from 'node:crypto';
-
-function generateCsrfToken(): string {
-  return crypto.randomBytes(32).toString('hex');
-}
-
-// Constant-time comparison; timingSafeEqual throws if the lengths differ
-function tokensMatch(received: unknown, expected: string | undefined): boolean {
-  if (typeof received !== 'string' || typeof expected !== 'string') return false;
-  const a = Buffer.from(received);
-  const b = Buffer.from(expected);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
-// Middleware: validate token on state-changing requests
-app.post('/api/data', (req, res) => {
-  if (!tokensMatch(req.headers['x-csrf-token'], req.session.csrfToken)) {
-    return res.status(403).json({ error: 'Invalid CSRF token' });
-  }
-  // ...handle request
-});
-```
-
-**Python (framework-neutral)**
-```python
-# ✅ Synchronizer token: one random token per session, checked on every state change
-import hmac
-import secrets
-
-def issue_csrf_token(session: dict) -> str:
-    token = session.get("csrf_token")
-    if token is None:
-        token = secrets.token_urlsafe(32)
-        session["csrf_token"] = token
-    return token  # render into a hidden form field or send as a request header
-
-def verify_csrf_token(session: dict, submitted: str | None) -> bool:
-    expected = session.get("csrf_token")
-    if not expected or not submitted:
-        return False
-    return hmac.compare_digest(expected.encode(), submitted.encode())  # constant time
-
-# Most web frameworks enable CSRF protection by default.
-# ❌ Never exempt a state-changing endpoint from the framework's CSRF protection
-#    without a documented reason (for example, a webhook verified by its signature)
-```
-
-**Salesforce (Visualforce)**
-```html
-<!-- ❌ action= on apex:page runs the method on page load: a GET request with no CSRF token -->
-<apex:page controller="InvoiceController" action="{!markPaid}">
-</apex:page>
-
-<!-- ✅ State changes go through a form POST, which carries the Visualforce CSRF token -->
-<apex:page controller="InvoiceController">
-    <apex:form>
-        <apex:commandButton value="Mark as paid" action="{!markPaid}"/>
-    </apex:form>
-</apex:page>
-```
-
-- Keep controller constructors, getters, and methods called from `<apex:page action>` free of DML: they run on GET requests, where no token is checked. Static analysis: PMD `VfCsrf` (page `action`) and `ApexCSRF` (DML in constructors and initializers).
-- Apex called from LWC or Aura goes through the Lightning framework, whose requests carry the framework's own CSRF token, so `@AuraEnabled` methods need no custom token. They still need server-side access checks (see [IDOR](#idor-insecure-direct-object-reference)).
-
-> 📖 Depth: [Visualforce CSRF](salesforce/visualforce.md#csrf--state-changes)
-
-**SameSite Cookie**
-```typescript
-// ✅ Set SameSite cookie as additional defense
-res.cookie('session', sessionId, {
-  httpOnly: true,
-  secure: true,
-  sameSite: 'strict',  // or 'lax' to allow top-level navigation GET requests
-  maxAge: 3600000,
-});
-```
+- Only credentials the browser attaches itself (cookies, HTTP auth, client certificates) need CSRF defenses; `Authorization: Bearer` APIs don't.
+- Django enables `CsrfViewMiddleware` (flag new `@csrf_exempt`); Flask needs Flask-WTF `CSRFProtect`; FastAPI, Starlette, and Express have nothing built in.
+- Defenses (OWASP): a token compared in constant time (`hmac.compare_digest`, [`crypto.timingSafeEqual`](nodejs.md#compare-secrets-in-constant-time)), a custom request header, or `Sec-Fetch-Site` with an `Origin` fallback. `SameSite` is defense in depth: `Lax` still sends cookies on top-level GETs, so GET never changes state. Webhooks exempt from CSRF verify a signature.
+- Salesforce: Visualforce changes state only through a form POST ([Visualforce CSRF](salesforce/visualforce.md#csrf--state-changes)); `@AuraEnabled` calls carry the Lightning framework's token.
 
 ### SSRF Prevention
 
-**Python**
 ```python
-# ❌ Vulnerable: fetches whatever URL the caller supplies
+# ❌ Fetches any URL the caller supplies: internal services, cloud metadata
+requests.get(url, timeout=5)
+
+# ✅ Exact HTTPS host allowlist; reject anything another URL parser could read differently
+from urllib.parse import urlsplit
+
 import requests
 
-def fetch_preview(url: str) -> bytes:
-    return requests.get(url, timeout=5).content
+ALLOWED_HOSTS = {"api.example.com", "cdn.example.com"}
 
-# ✅ Validate the URL against an allowlist first
-from urllib.parse import urlparse
-
-ALLOWED_HOSTS = {'api.example.com', 'cdn.example.com'}
 
 def is_safe_url(url: str) -> bool:
-    parsed = urlparse(url)
-    return parsed.scheme == 'https' and parsed.hostname in ALLOWED_HOSTS
+    # Backslashes, userinfo, non-ASCII, spaces, and control characters are where urlsplit()
+    # and urllib3 disagree: "https://evil.com\@api.example.com/" connects to evil.com
+    if not url.isascii() or "\\" in url or any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and parts.username is None
+        and parts.password is None
+        and parts.hostname in ALLOWED_HOSTS
+        and port in (None, 443)
+    )
+
 
 def fetch_preview(url: str) -> bytes:
     if not is_safe_url(url):
-        raise ValueError('URL not allowed')
-    # Don't follow redirects: a redirect can point to an internal address
+        raise ValueError("URL not allowed")
+    # A redirect can point anywhere, including internal addresses: don't follow it
     return requests.get(url, timeout=5, allow_redirects=False).content
 ```
 
-**Node.js**
 ```typescript
-// ❌ Vulnerable: fetching arbitrary URLs
-const url = req.query.url;
-const response = await fetch(url);
+// ✅ Node.js: fetch uses this same WHATWG parser; redirects are refused
+const ALLOWED_HOSTS = new Set(['api.example.com', 'cdn.example.com']);
 
-// ✅ Validate URL before fetching
-const ALLOWED_DOMAINS = ['api.internal.com'];
-
-function isSafeUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    // Block internal IPs
-    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
-      return false;
-    }
-    if (parsed.hostname.match(/^10\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\./)) {
-      return false; // Block private IP ranges
-    }
-    return ALLOWED_DOMAINS.includes(parsed.hostname);
-  } catch {
-    return false;
-  }
+function allowedUrl(input: string): URL | null {
+  const url = URL.canParse(input) ? new URL(input) : null;
+  const ok = url?.protocol === 'https:' && ALLOWED_HOSTS.has(url.hostname)
+    && !url.username && !url.password && !url.port;
+  return ok ? url : null;
 }
+
+const target = allowedUrl(String(req.query.url));
+if (!target) return res.status(400).end();
+const response = await fetch(target, { redirect: 'error', signal: AbortSignal.timeout(5000) });
 ```
 
-**Salesforce Apex**
-```apex
-// ❌ Endpoint built from caller input (endpointUrl is an @AuraEnabled parameter)
-HttpRequest req = new HttpRequest();
-req.setEndpoint(endpointUrl);
-req.setMethod('GET');
-
-// ✅ Fixed Named Credential endpoint; the caller supplies only data, URL-encoded
-HttpRequest req = new HttpRequest();
-req.setEndpoint('callout:Billing_API/v1/invoices/' + EncodingUtil.urlEncode(invoiceNumber, 'UTF-8'));
-req.setMethod('GET');
-HttpResponse res = new Http().send(req);
-```
-
-Call out only to Named Credential endpoints (`callout:Name/path`), never to a URL the caller supplies. Remote Site Settings are an org-wide allowlist of hosts, not a validation layer: any URL on a listed host is still reachable.
-
-> 📖 Depth: [Apex callouts](salesforce/apex.md#callouts--integrations)
+- Better still: take an allowlist key from the caller and map it to a fixed URL.
+- Open-ended destinations (webhooks, link previews): resolve every A and AAAA record, reject private, loopback, link-local (`169.254.169.254`), and reserved addresses, and connect to the vetted IP so DNS can't change in between; or route through an egress proxy that enforces this.
+- Refuse redirects or re-validate every hop. Host and IP string denylists are bypassable (`127.0.0.2`, `[::1]`, `0.0.0.0`, `localhost.`, decimal forms).
+- Salesforce: call out only to Named Credential endpoints with URL-encoded caller data ([Callouts](salesforce/apex.md#callouts--integrations)).
 
 ### IDOR (Insecure Direct Object Reference)
 
-**Python (SQLAlchemy)**
 ```python
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+# ❌ Any user can read any order
+order = session.get(Order, order_id)
 
-# ❌ Vulnerable: no ownership check, so any user can read any order
-def get_order(session: Session, current_user: User, order_id: int) -> Order:
-    order = session.get(Order, order_id)
-    if order is None:
-        raise NotFoundError(order_id)
-    return order
-
-# ✅ Scope the query to the current user
-def get_order(session: Session, current_user: User, order_id: int) -> Order:
-    stmt = select(Order).where(Order.id == order_id, Order.user_id == current_user.id)
-    order = session.scalars(stmt).one_or_none()
-    if order is None:
-        # Same "not found" (HTTP 404) for missing and foreign orders, so existence isn't revealed
-        raise NotFoundError(order_id)
-    return order
+# ✅ Scope the query to the caller; the same 404 for missing and foreign orders
+order = session.scalars(
+    select(Order).where(Order.id == order_id, Order.user_id == current_user.id)
+).one_or_none()
+if order is None:
+    raise NotFoundError(order_id)
 ```
 
-**Node.js (Prisma)**
-```typescript
-// ❌ Vulnerable: no authorization check
-app.get('/api/orders/:id', async (req, res) => {
-  const order = await db.order.findUnique({
-    where: { id: Number(req.params.id) }
-  });
-  res.json(order);
-});
-
-// ✅ Include user context in query
-app.get('/api/orders/:id', async (req, res) => {
-  const order = await db.order.findFirst({
-    where: {
-      id: Number(req.params.id),
-      userId: req.user.id,  // Scope to current user
-    }
-  });
-  if (!order) return res.status(404).json({ error: 'Not found' });
-  res.json(order);
-});
-```
-
-**Salesforce Apex**
-```apex
-// ❌ Trusts the client's Id: without sharing and, at API 66.0 and earlier, a system-mode query
-public without sharing class InvoiceController {
-    @AuraEnabled
-    public static Invoice__c getInvoice(Id invoiceId) {
-        return [SELECT Id, Name, Amount__c FROM Invoice__c WHERE Id = :invoiceId];
-    }
-}
-
-// ✅ Re-query in user mode: sharing, CRUD, and FLS decide what the caller can see
-public with sharing class InvoiceController {
-    @AuraEnabled(cacheable=true)
-    public static Invoice__c getInvoice(Id invoiceId) {
-        List<Invoice__c> rows = [
-            SELECT Id, Name, Amount__c FROM Invoice__c
-            WHERE Id = :invoiceId
-            WITH USER_MODE
-        ];
-        return rows.isEmpty() ? null : rows[0];
-    }
-}
-```
-
-An `@AuraEnabled` method that takes a record Id must never trust it: re-query in user mode (in a `with sharing` class) before returning or changing the record.
-
-> 📖 Depth: [Apex data access](salesforce/apex.md#data-access-security)
-
-**UUID vs auto-increment IDs**
-```typescript
-// ❌ Auto-increment IDs can be enumerated
-// GET /api/users/1, /api/users/2, /api/users/3 ...
-
-// ✅ UUIDs are unpredictable
-// GET /api/users/550e8400-e29b-41d4-a716-446655440000
-
-// ⚠️ UUIDs only prevent enumeration; they are not access control
-// You still need to verify that the current user may access the resource
-```
+Prisma: `findFirst({ where: { id, userId: req.user.id } })`. Random IDs (UUIDv4) slow enumeration but are not access control. Salesforce: an `@AuraEnabled` method re-queries a client-supplied Id in user mode ([Apex data access](salesforce/apex.md#data-access-security)).
 
 ### Command Injection Prevention
 
-**Python**
 ```python
-# ❌ Vulnerable: shell=True
-import subprocess
-subprocess.run(f"convert {filename} output.png", shell=True)
+# ❌ The shell parses the input
+subprocess.run(f"convert {filename} out.png", shell=True)
 
-# ✅ Use list arguments without shell
-subprocess.run(['convert', filename, 'output.png'], check=True)
-
-# ✅ Validate and sanitize input
-import shlex
-safe_filename = shlex.quote(filename)
+# ✅ No shell; a resolved absolute path can't be read as an option
+path = (UPLOAD_DIR / filename).resolve()  # UPLOAD_DIR: an absolute, resolved Path
+if not path.is_relative_to(UPLOAD_DIR):
+    raise ValueError("path escapes the upload directory")
+subprocess.run(["convert", str(path), "out.png"], check=True, timeout=30)
 ```
 
-**Node.js**
-```typescript
-// ❌ Vulnerable: exec with string interpolation
-import { exec } from 'node:child_process';
-exec(`convert ${filename} output.png`);
+- Argument lists stop shell injection, not option injection: a value starting with `-` becomes a flag, so use `--` where supported or absolute paths. Node.js: `execFile`/`spawn` with an array and no `shell: true`.
+- `shlex.quote()` only builds POSIX shell strings when a shell is unavoidable; it is not validation, and in an argument list its quotes become part of the value.
+- Tools that interpret file names (ImageMagick coders such as `msl:`) are restricted in the tool's own policy.
 
-// ✅ Use execFile with array arguments (no shell)
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-const execFileAsync = promisify(execFile);
-await execFileAsync('convert', [filename, 'output.png']);
+### Deserialization & File Paths
 
-// ❌ Never pass user input to shell
-exec(`echo ${userInput}`);  // userInput = "; rm -rf /"
-
-// ✅ Sanitize or use non-shell alternatives
-import { writeFile } from 'node:fs/promises';
-await writeFile('output.txt', userInput);  // No shell involved
-```
+- Untrusted `pickle`, `shelve`, `marshal`, `jsonpickle`, and `yaml.load` without `SafeLoader` execute code (S301, S506); use JSON or `yaml.safe_load`.
+- Resolve user paths and check containment (`resolved.is_relative_to(base)`; [Node.js](nodejs.md#nodejs-security)). `tarfile` extraction passes `filter="data"` (the default only from Python 3.14); hand-written zip loops check every entry name.
 
 ## Data Protection
 
-### Sensitive Data Handling
-- [ ] No secrets in source code
-- [ ] Secrets stored in environment variables or secret manager
-- [ ] Sensitive data encrypted at rest
-- [ ] Sensitive data encrypted in transit (HTTPS)
-- [ ] PII handled according to regulations (GDPR, etc.)
-- [ ] Sensitive data not logged
-- [ ] Secure data deletion when required
-
-### Configuration Security
-```yaml
-# ❌ Secrets in config files
-database:
-  password: "super-secret-password"
-
-# ✅ Reference environment variables
-database:
-  password: ${DATABASE_PASSWORD}
-```
+Secrets come from the environment or a secret manager, never code, committed `.env` files, fixtures, images, or CI logs; a leaked secret is rotated, not just deleted (ask the author).
 
 ### Error Messages
-```typescript
-// ❌ Leaking sensitive information
-catch (error) {
-  return res.status(500).json({
-    error: error.stack,  // Exposes internal details
-    query: sqlQuery      // Exposes database structure
-  });
-}
 
-// ✅ Generic error messages
-catch (error) {
-  logger.error('Database error', { error, userId });  // Log internally
-  return res.status(500).json({
-    error: 'An unexpected error occurred'
-  });
-}
-```
+Clients get a generic message and a correlation ID; stack traces, SQL, and internal hostnames stay in server logs. Salesforce: `AuraHandledException` with a user-safe message. Principles: [Error Handling](cross-cutting/error-handling-principles.md#core-principles).
 
 ## API Security
 
 ### Rate Limiting
-- [ ] Rate limiting on all public endpoints
-- [ ] Stricter limits on authentication endpoints
-- [ ] Per-user and per-IP limits
-- [ ] Graceful handling when limits exceeded
+
+Login, password reset, OTP, signup, and expensive endpoints need per-account and per-IP limits (429 with `Retry-After`). When a new one has no limiter in code, ask whether the gateway enforces one before reporting it.
 
 ### CORS Configuration
-```typescript
-// ❌ Overly permissive CORS
-app.use(cors({ origin: '*' }));
 
-// ✅ Restrictive CORS
-app.use(cors({
-  origin: ['https://your-app.com'],
-  methods: ['GET', 'POST'],
-  credentials: true
-}));
+```typescript
+// ❌ Reflects any Origin with credentials: every site can read the user's data
+app.use(cors({ origin: true, credentials: true }));
+
+// ✅ Exact origins when credentials are allowed
+app.use(cors({ origin: ['https://app.example.com'], credentials: true }));
 ```
+
+`*` (the `cors()` default) is fine for public, unauthenticated data; browsers refuse it on credentialed requests. Flag reflected or `null` origins with credentials, unanchored regexes and suffix checks, and `*` on intranet-only services.
 
 ### HTTP Headers
-```typescript
-// Security headers to set
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-    }
-  },
-  hsts: { maxAge: 31536000, includeSubDomains: true },
-  noSniff: true,
-  xssFilter: true,
-  frameguard: { action: 'deny' }
-}));
-```
+
+`app.use(helmet())` sets a CSP, HSTS, `X-Content-Type-Options`, `frame-ancestors 'self'`, and `X-XSS-Protection: 0`, which disables the legacy browser filter on purpose (`xssFilter: true` sets the same). HSTS `includeSubDomains` or `preload` only when every subdomain serves HTTPS.
 
 ## Cryptography
 
-### Secure Practices
-- [ ] Using well-established algorithms (AES-256, RSA-2048+)
-- [ ] Not implementing custom cryptography
-- [ ] Using cryptographically secure random number generation
-- [ ] Proper key management and rotation
-- [ ] Secure key storage (HSM, KMS)
+AEAD (AES-GCM, ChaCha20-Poly1305) with a unique nonce per message; no ECB, no CBC without a MAC; AES-128 and AES-256 are both fine, RSA keys ≥2048 bits. No custom cryptography; keys come from a KMS or secret manager; secrets and signatures are compared in constant time.
 
 ### Common Mistakes
+
 ```typescript
-// ❌ Weak random generation
+// ❌ Predictable token, and a fast hash for passwords
 const token = Math.random().toString(36);
+const hash = crypto.createHash('sha256').update(password).digest('hex');
 
-// ✅ Cryptographically secure random
-import crypto from 'node:crypto';
+// ✅ CSPRNG token and a password hash
 const token = crypto.randomBytes(32).toString('hex');
-
-// ❌ MD5/SHA1 for passwords
-const hash = crypto.createHash('md5').update(password).digest('hex');
-
-// ✅ Use bcrypt or argon2
-import bcrypt from 'bcrypt';
 const hash = await bcrypt.hash(password, 12);
 ```
 
+Python: `secrets.token_urlsafe(32)` and `argon2.PasswordHasher().hash(password)` (S311, S324).
+
 ## Dependency Security
 
-### Checklist
-- [ ] Dependencies from trusted sources only
-- [ ] No known vulnerabilities (npm audit, pip-audit)
-- [ ] Dependencies kept up to date
-- [ ] Lock files committed (package-lock.json, poetry.lock / uv.lock, hashed requirements.txt)
-- [ ] Minimal dependency usage
-- [ ] License compliance verified
+When the PR touches manifests or lockfiles: the lockfile changes with the manifest, new packages are maintained and justified, and ranges don't widen without reason.
 
 ### Audit Commands
-```bash
-# Node.js
-npm audit
-npm audit fix
 
-# Python
-pip-audit
-
-# Salesforce: local static analysis only, never with --target-org during review.
-# The Security tag includes PMD security rules and RetireJS checks for vulnerable
-# JavaScript libraries, including those in static resources.
-sf code-analyzer run --workspace force-app --rule-selector Security
-
-# General
-snyk test
-```
+Read `npm audit`, `pip-audit`, or Snyk results from CI, or ask the author; the review doesn't run them. Salesforce: Code Analyzer on local paths ([Tooling](salesforce/platform.md#tooling)).
 
 ## Logging & Monitoring
 
 ### Secure Logging
-- [ ] No sensitive data in logs (passwords, tokens, PII)
-- [ ] Logs protected from tampering
-- [ ] Appropriate log retention
-- [ ] Security events logged (login attempts, permission changes)
-- [ ] Log injection prevented
 
 ```typescript
-// ❌ Logging sensitive data
-logger.info(`User login: ${email}, password: ${password}`);
+// ❌ Credentials and PII in the log
+logger.info(`login ${email} password=${password}`);
 
-// ✅ Safe logging
-logger.info('User login attempt', { email, success: true });
+// ✅ Structured fields with IDs; the outcome comes from the code path
+logger.info({ userId: user.id, success }, 'login attempt');
 ```
+
+No passwords, tokens, session IDs, API keys, or card numbers; PII becomes IDs. Structured logs prevent forged lines (plain text: strip CR/LF from input). New auth and permission flows log security events.
 
 ## Salesforce Platform Security
 
-> Load the [Salesforce Platform Guide](salesforce/platform.md) first — it defines the security model, API-version rules, and [severity calibration](salesforce/platform.md#severity-calibration) for Salesforce findings. Each item below links to the guide that owns the topic.
+Load the [Salesforce Platform Guide](salesforce/platform.md) first: its [Security Model](salesforce/platform.md#security-model) sets the API-version defaults and its [severity calibration](salesforce/platform.md#severity-calibration) applies to Salesforce findings.
 
-### Sharing, CRUD, and FLS
-- [ ] Each class is judged against its own `<apiVersion>` (in its `-meta.xml`): from API 67.0 (Summer '26) SOQL, SOSL, and DML run in user mode by default and a class without a sharing keyword runs `with sharing`; earlier versions default to system mode ([Security Model](salesforce/platform.md#security-model))
-- [ ] CRUD and FLS are enforced wherever the version default doesn't do it: `as user` DML, `AccessLevel.USER_MODE` on `Database` methods, `Security.stripInaccessible` for records sent to or received from the client ([Data Access Security](salesforce/apex.md#data-access-security))
-- [ ] Queries use `WITH USER_MODE`, and no `WITH SECURITY_ENFORCED` remains (it doesn't compile at API 67.0+) ([Access Mode in Queries](salesforce/soql-sosl.md#access-mode-in-queries))
-- [ ] Every system-mode escape (`without sharing`, `WITH SYSTEM_MODE`, `AccessLevel.SYSTEM_MODE`, `as system`) has a documented reason and the narrowest possible scope
-- [ ] Access-sensitive logic lives in handler classes, not trigger bodies: triggers run in system mode at every API version ([Trigger Architecture](salesforce/apex-triggers.md#trigger-architecture))
+- Sharing, CRUD, and FLS follow each class's `<apiVersion>`; system-mode escapes have a documented reason ([Apex data access](salesforce/apex.md#data-access-security)). `@AuraEnabled`, `@RemoteAction`, `@RestResource`, `webservice`, `@InvocableMethod`, and Visualforce controllers are public entry points ([guest access](salesforce/platform.md#guest-and-experience-cloud-users)).
+- Owners: [SOQL injection](salesforce/soql-sosl.md#soql-injection), [UI escape hatches](cross-cutting/xss-prevention.md#salesforce-lwc-aura-visualforce), [credentials and endpoints](salesforce/metadata.md#integration-endpoints--credentials), [static review only](salesforce/platform.md#static-review-only).
 
-### Entry points and guest access
-- [ ] Every entry point is treated as a public API: `@AuraEnabled` methods (callable directly, not only from the component that uses them), `@RemoteAction`, `@RestResource` and `webservice` methods, `@InvocableMethod` actions in screen flows, and Visualforce controllers and extensions ([Security Model](salesforce/platform.md#security-model))
-- [ ] Client input, including record Ids, is validated and re-checked on the server with user-mode queries, never trusted ([IDOR](#idor-insecure-direct-object-reference))
-- [ ] Components with Experience Cloud targets (`lightningCommunity__Page`, `lightningCommunity__Default`) make their Apex reachable by guest users, and that Apex enforces sharing and CRUD/FLS itself ([Component Configuration](salesforce/lwc.md#component-configuration))
-- [ ] Guest-user access changes (guest profile, guest sharing rules, public site pages) have a security sign-off; guests can't get View All, Modify All, or edit and delete object permissions, and guest sharing rules grant Read at most ([Permission Sets, Groups & Profiles](salesforce/metadata.md#permission-sets-groups--profiles))
-- [ ] Errors sent to the client carry a user-safe message (`AuraHandledException`), never stack traces, queries, or data the user can't see ([The LWC-Apex Contract](salesforce/lwc.md#the-lwc-apex-contract))
+## Severity
 
-### Secrets and integration metadata
-- [ ] No secrets, tokens, or passwords in Apex, Custom Labels, Custom Metadata, custom settings, static resources, or metadata XML ([Integration Endpoints & Credentials](salesforce/metadata.md#integration-endpoints--credentials))
-- [ ] Callouts go through Named Credentials backed by External Credentials, with principal access granted through permission sets; no hard-coded credentials or plain-HTTP endpoints in code (PMD `ApexSuggestUsingNamedCred`, `ApexInsecureEndpoint`)
-- [ ] Remote Site Settings use HTTPS and keep `disableProtocolSecurity` false; CSP Trusted Sites and CORS allowlist entries name exact origins and allow only what they need
-- [ ] OAuth integrations request the narrowest scopes, and new ones are External Client Apps (new connected apps can't be created since Spring '26)
-- [ ] Encryption keys and IVs are generated (`Crypto.generateAesKey`, `Crypto.encryptWithManagedIV`) or stored as protected secrets, never hard-coded (PMD `ApexBadCrypto`)
+- 🔴 blocking: exploitable as written, or exposes data or secrets.
+- 🟡 important: exploitable under specific conditions, or removes a defense-in-depth layer.
+- 🟢 nit: hardening with little risk. 💡 suggestion: optional.
 
-### Local static analysis only
-- [ ] The review stays static: nobody deploys, runs anonymous Apex or Apex tests, or queries an org for it; test results, coverage, and debug logs come from the author or CI ([Static Review Only](salesforce/platform.md#static-review-only))
-- [ ] Salesforce Code Analyzer v5 runs on local paths only, for example `sf code-analyzer run --workspace force-app --rule-selector Security` (the v4 `sf scanner` commands were retired in August 2025)
-- [ ] No `--target-org` and no `apexguru` rules (a broad selector such as `all` can include them): ApexGuru is the only engine that contacts an org, and without `--target-org` it falls back to the Salesforce CLI's default org
-- [ ] Analyzer findings are triaged against the file's `<apiVersion>` and entry point before they are reported ([Tooling](salesforce/platform.md#tooling))
+## References
 
-## Security Review Severity Levels
-
-| Severity | Description | Action |
-|----------|-------------|--------|
-| **Critical** | Immediate exploitation possible, data breach risk | Block merge, fix immediately |
-| **High** | Significant vulnerability, requires specific conditions | Block merge, fix before release |
-| **Medium** | Moderate risk, defense in depth concern | Should fix, can merge with tracking |
-| **Low** | Minor issue, best practice violation | Nice to fix, non-blocking |
-| **Info** | Suggestion for improvement | Optional enhancement |
+- [OWASP Cheat Sheet Series](https://cheatsheetseries.owasp.org/)
+- [OWASP Top 10:2025](https://owasp.org/Top10/2025/)
+- [NIST SP 800-63B-4](https://pages.nist.gov/800-63-4/sp800-63b.html)

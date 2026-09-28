@@ -1,296 +1,86 @@
 # NestJS Code Review Guide
 
-Review guidance for NestJS applications: dependency injection and layered architecture, module organization, Guard/Interceptor/Pipe responsibilities, DTO validation, error handling, circular dependencies, testing patterns, and lifecycle and runtime concerns.
+NestJS 11 and 12 applications: validation (class-validator DTOs or Standard Schema), guards and interceptors, exception filters, dependency injection and scopes, modules, lifecycle, testing, and house layering conventions.
 
-> **Related guides:** NestJS code is TypeScript on Node.js. Load [typescript.md](typescript.md) for type-level issues and [javascript.md](javascript.md) for async and Promise pitfalls. Load [nodejs.md](nodejs.md) when the change touches bootstrap (`main.ts`), shutdown, streams, configuration, or other process-level concerns.
+Load with [typescript.md](typescript.md); open [nodejs.md](nodejs.md) only for runtime topics (bootstrap, shutdown, streams, configuration), and [javascript.md](javascript.md) sections for language semantics.
 
-## Table of Contents
+## Review Checklist
 
-- [Dependency Injection & Layered Architecture](#dependency-injection--layered-architecture)
-- [Module Organization](#module-organization)
-- [Guard / Interceptor / Pipe](#guard--interceptor--pipe)
-- [Validation Patterns (DTO)](#validation-patterns-dto)
-- [Error Handling](#error-handling)
-- [Circular Dependencies](#circular-dependencies)
-- [Testing Patterns](#testing-patterns)
-- [Lifecycle & Runtime](#lifecycle--runtime)
-- [Review Checklist](#review-checklist)
+Read this checklist first; open a section only when the diff contains its pattern.
 
----
+Default severities: 🔴 [blocking] · 🟡 [important] · 🟢 [nit] · 💡 [suggestion]; adjust them to the impact in context. A rule a linter or tsconfig already enforces is a finding only when the diff disables it, pre-existing code only when the change makes it worse, and house conventions only when the repository already follows them.
 
-## Dependency Injection & Layered Architecture
+### Validation → [Validation Patterns (DTO)](#validation-patterns-dto)
 
-### Three-layer architecture: Controller → Service → Repository
+- [ ] 🔴 New or changed endpoints validate body, query, and params through the app's global mechanism: `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })` for class-validator DTOs, or NestJS 12 `schema` options with `StandardSchemaValidationPipe` (whose `transform: false` returns the original input, unknown keys included).
+- [ ] 🔴 No `@Body() body: any` (or an untyped object) reaching persistence: a DTO or a schema per operation.
+- [ ] 🟡 Nested DTOs pair `@ValidateNested()` with `@Type(() => Dto)` (arrays add `{ each: true }` and `@IsArray()`); without `@Type`, the strict global pipe rejects every nested object and `whitelist` alone empties it.
+- [ ] 🟢 `@IsOptional()` on a nested object only matters when `null` must be accepted or other validators apply: an omitted value already passes `@ValidateNested()`.
+- [ ] 💡 PATCH uses `PartialType(CreateDto)`; PUT may reuse the create DTO.
 
-```typescript
-// ❌ ORM injected straight into the Controller, skipping the Service layer
-@Controller('users')
-export class UsersController {
-  constructor(private readonly prisma: PrismaService) {}
+### Guards & interceptors → [Guard / Interceptor / Pipe](#guard--interceptor--pipe)
 
-  @Get()
-  findAll() {
-    return this.prisma.user.findMany();
-  }
-}
+- [ ] 🔴 A guard or service that loads a resource for an ownership check handles "not found" (no `null.userId` TypeError and 500) and compares against the authenticated user, never a client-supplied owner ID.
+- [ ] 🟡 Guards read metadata with `Reflector.getAllAndOverride()` over handler and class, and deny rather than crash when `request.user` is missing. Store lookups in guards (API keys, sessions, policies) are fine.
+- [ ] 🟡 Interceptors hold cross-cutting concerns (logging, caching, response mapping, timing), not business rules, and log through the application's logger.
 
-// ✅ Controller → Service → Repository
-@Controller('users')
-export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+### Errors → [Error Handling](#error-handling)
 
-  @Get()
-  findAll() {
-    return this.usersService.findAll();
-  }
-}
+- [ ] 🟡 No `catch { return null }` that makes "failed" look like "not found"; services throw meaningful exceptions.
+- [ ] 🟡 A catch-all `@Catch()` filter keeps `HttpException` bodies (validation messages), replies through the platform adapter (`BaseExceptionFilter` or `HttpAdapterHost`), hides unknown errors behind a generic 500, and branches on `host.getType()` when the app also serves GraphQL, microservices, or WebSockets.
+- [ ] 🟢 Built-in exceptions (`NotFoundException`, `ConflictException`, …) rather than `new HttpException(message, code)`.
 
-@Injectable()
-export class UsersService {
-  constructor(private readonly usersRepo: UsersRepository) {}
+### DI & modules → [Dependency Injection & Layered Architecture](#dependency-injection--layered-architecture)
 
-  findAll() {
-    return this.usersRepo.findAll();
-  }
-}
-```
+- [ ] 🟡 A `Scope.REQUEST` provider is justified: it makes every consumer request-scoped, and lifecycle hooks do not run on those instances; per-request context comes from `AsyncLocalStorage` (for example `nestjs-cls`).
+- [ ] 🟡 No new circular module imports; a `forwardRef()` carries a design note.
+- [ ] 💡 Interface-plus-token injection only where a port has several implementations; concrete class providers are already swappable in tests.
 
-### Repositories should not inject each other
+### Lifecycle → [Lifecycle & Runtime](#lifecycle--runtime)
 
-```typescript
-// ❌ A Repository injects another Repository; orchestration belongs in a Service
-@Injectable()
-export class OrdersRepository {
-  constructor(private readonly usersRepository: UsersRepository) {}
-}
+- [ ] 🟡 When the PR touches `main.ts` or providers that own connections: `app.enableShutdownHooks()` is called, and pools, clients, and consumers close in `onModuleDestroy`/`onApplicationShutdown`.
+- [ ] 🟡 NestJS 12 upgrades re-check hook-order assumptions, ESM-only packages (Jest needs Node.js 24.9+), and the Node.js floor (20.19+ or 22.12+).
 
-// ✅ Cross-repository orchestration happens in the Service
-@Injectable()
-export class OrdersService {
-  constructor(
-    private readonly ordersRepo: OrdersRepository,
-    private readonly usersRepo: UsersRepository,
-  ) {}
-}
-```
+### Testing → [Testing Patterns](#testing-patterns)
 
-### God service: split it once it has more than 8 dependencies
+- [ ] 🟡 E2E tests get the production pipes, guards, and filters from the module (`APP_PIPE`, `APP_GUARD`, `APP_FILTER`) or from one shared setup function, and close the app in `afterAll`.
+- [ ] 💡 Use cases are unit-tested by constructing them with fakes, or with `overrideProvider()`.
 
-```typescript
-// ❌ A giant Service with 9 dependencies
-@Injectable()
-export class OrdersService {
-  constructor(
-    private readonly ordersRepo: OrdersRepository,
-    private readonly usersRepo: UsersRepository,
-    private readonly productsRepo: ProductsRepository,
-    private readonly paymentsService: PaymentsService,
-    private readonly mailerService: MailerService,
-    private readonly inventoryService: InventoryService,
-    private readonly discountService: DiscountService,
-    private readonly taxService: TaxService,
-    private readonly auditService: AuditService,
-  ) {}
-}
+### House conventions → [Module Organization](#module-organization)
 
-// ✅ Split into use-case services (one operation per file)
-@Injectable()
-export class CreateOrderService {
-  constructor(
-    private readonly ordersRepo: OrdersRepository,
-    private readonly paymentsService: PaymentsService,
-  ) {}
+Apply these only when the repository already follows them; otherwise they are 💡 suggestions at most.
 
-  async execute(dto: CreateOrderDto) { /* ... */ }
-}
-```
-
-### Dependency inversion with Symbol tokens
-
-```typescript
-// ❌ Depends directly on a concrete implementation; it cannot be swapped in tests
-@Injectable()
-export class UsersService {
-  constructor(private readonly repo: TypeOrmUserRepository) {}
-}
-
-// ✅ Interface + Symbol token; it can be swapped for an in-memory implementation
-export const USER_REPOSITORY = Symbol('USER_REPOSITORY');
-
-export interface UserRepository {
-  findAll(): Promise<User[]>;
-  findById(id: string): Promise<User | null>;
-}
-
-// module:
-{
-  provide: USER_REPOSITORY,
-  useClass: TypeOrmUserRepository,
-}
-
-// service:
-@Injectable()
-export class UsersService {
-  constructor(@Inject(USER_REPOSITORY) private readonly repo: UserRepository) {}
-}
-```
-
----
-
-## Module Organization
-
-### Recommended four-layer structure
-
-```text
-src/
-  common/         ← Global technical infrastructure (Guards, Filters, Interceptors, Decorators)
-  core/           ← Internal infrastructure (Config, Database, Queue setup)
-  integrations/   ← Wrappers for external services (Mailer, Storage, Stripe, SMS)
-  modules/        ← Business logic organized by domain
-    [feature]/
-      dtos/
-      repositories/
-      services/
-        internal/     ← Services shared inside the module
-        use-cases/    ← One file = one operation
-      types/
-      [feature].controller.ts
-      [feature].module.ts
-```
-
-### The domain must be framework-agnostic
-
-```typescript
-// ❌ The domain entity depends on NestJS and cannot be tested on its own
-import { Injectable } from '@nestjs/common';
-
-@Injectable()
-export class User {
-  constructor(private readonly email: string) {}
-}
-
-// ✅ Domain entities are plain classes without framework decorators
-export class User {
-  private constructor(private readonly email: string) {}
-
-  static create(email: string): User {
-    return new User(email);
-  }
-}
-```
-
-### Key rules
-
-- `common/` must contain **no business logic**: if it needs to know about "orders", it does not belong there
-- `integrations/` wraps each external service; switching from SendGrid to AWS SES changes a single directory
-- Use **use-case services** (one operation per file) instead of a giant `XxxService` with 15 methods
-
----
-
-## Guard / Interceptor / Pipe
-
-### Business logic does not belong in guards
-
-```typescript
-// ❌ The Guard queries the database and makes a business decision
-@Injectable()
-export class OrderOwnershipGuard implements CanActivate {
-  constructor(private readonly prisma: PrismaService) {}
-
-  async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = context.switchToHttp().getRequest();
-    const order = await this.prisma.order.findUnique({
-      where: { id: req.params.id },
-    });
-    if (order.userId !== req.user.id) {
-      return false; // Data access and the business rule both live in the Guard
-    }
-    return true;
-  }
-}
-
-// ✅ The Guard only checks authorization (roles/permissions)
-@Injectable()
-export class RolesGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) {}
-
-  canActivate(context: ExecutionContext): boolean {
-    const requiredRoles = this.reflector.getAllAndOverride<string[]>('roles', [
-      context.getHandler(),
-      context.getClass(),
-    ]);
-    if (!requiredRoles) return true;
-    const { user } = context.switchToHttp().getRequest();
-    return requiredRoles.some((role) => user.roles?.includes(role));
-  }
-}
-```
-
-### Use interceptors only for cross-cutting concerns
-
-```typescript
-// ❌ Business logic inside an Interceptor
-@Injectable()
-export class PricingInterceptor implements NestInterceptor {
-  intercept(context: ExecutionContext, next: CallHandler) {
-    // Calculating discounts is not a cross-cutting concern!
-    return next.handle().pipe(map(data => applyDiscount(data)));
-  }
-}
-
-// ✅ Interceptors for logging, caching, response mapping, and timing
-@Injectable()
-export class LoggingInterceptor implements NestInterceptor {
-  intercept(context: ExecutionContext, next: CallHandler) {
-    const now = Date.now();
-    const req = context.switchToHttp().getRequest();
-    return next.handle().pipe(
-      tap(() => console.log(`${req.method} ${req.url} - ${Date.now() - now}ms`)),
-    );
-  }
-}
-```
-
-### The global ValidationPipe must set whitelist
-
-```typescript
-// ❌ No whitelist: extra properties in the request body pass straight through
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  await app.listen(3000);
-}
-
-// ✅ A global ValidationPipe with whitelist strips unknown properties
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-    }),
-  );
-  await app.listen(3000);
-}
-```
+- [ ] 🟢 Controllers delegate to services; no ORM client in a controller; repositories do not inject each other.
+- [ ] 💡 A service with more dependencies than the repository's own threshold splits into use-case services.
+- [ ] 🟢 Folder placement (`common/`, `core/`, `integrations/`, `modules/<feature>/`) and framework-free domain classes; ORM entities and schemas are decorated by design and are never findings.
 
 ---
 
 ## Validation Patterns (DTO)
 
-### `@ValidateNested()` must be paired with `@Type()`
+Register the global pipe as a provider, so e2e tests built from `AppModule` get the same validation as production:
 
 ```typescript
-// ❌ @ValidateNested alone: validation of the nested object is silently skipped!
-export class CreateOrderDto {
-  @ValidateNested()
-  shipping: AddressDto;
-}
+import { Module, ValidationPipe } from '@nestjs/common';
+import { APP_PIPE } from '@nestjs/core';
 
-// ✅ Use @ValidateNested and @Type together
-import { Type } from 'class-transformer';
+// ✅ class-validator DTOs: strip or reject unknown properties, transform payloads into DTO instances
+@Module({
+  providers: [
+    { provide: APP_PIPE, useValue: new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }) },
+  ],
+})
+export class AppModule {}
+```
 
+NestJS 12 also accepts a Standard Schema (Zod, Valibot, ArkType) per parameter: `@Body({ schema: createUserSchema }) body: CreateUser` with `StandardSchemaValidationPipe` registered globally. With its default `transform: true` the handler receives the schema's output (a Zod `z.object` strips unknown keys); `transform: false` hands back the original input.
+
+```typescript
 export class CreateOrderDto {
+  // ❌ @ValidateNested() alone leaves the nested value a plain object. With whitelist + forbidNonWhitelisted
+  //    every request fails ("shipping.property street should not exist"); with whitelist alone shipping
+  //    is emptied to {}; without whitelist nothing inside it is validated
+  // ✅ Pair it with @Type
   @ValidateNested()
   @Type(() => AddressDto)
   shipping: AddressDto;
@@ -299,298 +89,95 @@ export class CreateOrderDto {
   @ValidateNested({ each: true })
   @Type(() => OrderItemDto)
   items: OrderItemDto[];
-}
-```
 
-### No bare `any` body
-
-```typescript
-// ❌ No DTO: no validation, no type safety, no Swagger docs
-@Post()
-create(@Body() body: any) {
-  return this.service.create(body);
-}
-
-// ✅ Create a DTO for every operation
-export class CreateUserDto {
-  @IsEmail()
-  email: string;
-
-  @IsString()
-  @MinLength(2)
-  @MaxLength(100)
-  name: string;
-}
-
-@Post()
-create(@Body() dto: CreateUserDto) {
-  return this.service.create(dto);
-}
-```
-
-### Create and update should use different DTOs
-
-```typescript
-// ❌ PATCH also requires every field, which is poor API design
-@Patch(':id')
-update(@Body() dto: CreateUserDto) { /* all fields required */ }
-
-// ✅ Update uses PartialType
-export class UpdateUserDto extends PartialType(CreateUserDto) {}
-
-@Patch(':id')
-update(@Body() dto: UpdateUserDto) { /* all fields optional */ }
-```
-
-### Optional nested objects
-
-```typescript
-// ❌ Optional nested object without @IsOptional
-export class UpdateOrderDto {
+  @IsOptional() // needed only to accept null: an omitted billing already skips @ValidateNested
   @ValidateNested()
   @Type(() => AddressDto)
-  shipping?: AddressDto; // Validation still runs when it is undefined
-}
-
-// ✅ @IsOptional + @ValidateNested + @Type
-export class UpdateOrderDto {
-  @IsOptional()
-  @ValidateNested()
-  @Type(() => AddressDto)
-  shipping?: AddressDto;
+  billing?: AddressDto | null;
 }
 ```
+
+A handler that takes `@Body() body: any` gets no validation, no types, and no API documentation. PATCH endpoints take `UpdateDto extends PartialType(CreateDto)` (from `@nestjs/mapped-types` or `@nestjs/swagger`) so every field is optional; a PUT that replaces the whole resource can reuse the create DTO.
+
+---
+
+## Guard / Interceptor / Pipe
+
+```typescript
+// ❌ A missing order throws TypeError (a 500), and the ownership rule is hidden in a guard
+async canActivate(context: ExecutionContext): Promise<boolean> {
+  const req = context.switchToHttp().getRequest();
+  const order = await this.prisma.order.findUnique({ where: { id: req.params.id } });
+  return order.userId === req.user.id;
+}
+
+// ✅ A role guard: metadata from the handler, then the class; a request without a user is denied, not a crash
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const requiredRoles = this.reflector.getAllAndOverride<string[] | undefined>('roles', [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (!requiredRoles) return true;
+    const { user } = context.switchToHttp().getRequest<{ user?: { roles?: string[] } }>();
+    return requiredRoles.some((role) => user?.roles?.includes(role) ?? false);
+  }
+}
+```
+
+Ownership checks can live in a guard or in the service. Either way the lookup turns a missing resource into a 404 (or a 403 that does not reveal existence) and compares with the authenticated user. Interceptors that compute discounts or other business results belong in services; timing and logging interceptors use `finalize()` so failures are measured too.
 
 ---
 
 ## Error Handling
 
-### Never swallow errors
+`try { return await this.repo.findById(id); } catch { return null; }` makes an outage look like a miss: let failures propagate, and turn a real miss into ``throw new NotFoundException(`User ${id} not found`)``.
+
+A hand-written catch-all filter that replies with only `statusCode`, `timestamp`, and `path` discards every `HttpException` body, including the ValidationPipe's messages, and `response.status().json()` ties it to Express.
 
 ```typescript
-// ❌ catch { return null } hides the problem: callers cannot tell "not found" from "failed"
-async findOne(id: string) {
-  try {
-    return await this.repo.findById(id);
-  } catch (e) {
-    return null;
-  }
-}
+import { ArgumentsHost, Catch } from '@nestjs/common';
+import { BaseExceptionFilter } from '@nestjs/core';
 
-// ✅ Throw a meaningful exception
-async findOne(id: string): Promise<User> {
-  const user = await this.repo.findById(id);
-  if (!user) {
-    throw new NotFoundException(`User ${id} not found`);
-  }
-  return user;
-}
-```
-
-> 📖 Cross-language principles (don't swallow errors, add context, use specific types, fail fast, handle each error once): [Error Handling Principles](cross-cutting/error-handling-principles.md#core-principles).
-
-### Use the built-in exception classes
-
-```typescript
-// ❌ Building the HTTP error by hand
-throw new HttpException('Bad request', 400);
-
-// ✅ Use the semantic built-in exceptions
-throw new BadRequestException('Invalid email format');
-throw new NotFoundException('User not found');
-throw new ConflictException('Email already taken');
-throw new ForbiddenException('Insufficient permissions');
-throw new UnauthorizedException('Invalid credentials');
-```
-
-### Custom exception filters
-
-```typescript
-// ✅ A global exception filter gives every error the same response format
+// ✅ HttpException bodies pass through, unknown errors become a logged generic 500, and replies go through
+//    the platform adapter (Express or Fastify). HTTP only: apps that also serve GraphQL, microservices, or
+//    WebSockets branch on host.getType() and use those contexts' own exception handling
 @Catch()
-export class AllExceptionsFilter implements ExceptionFilter {
-  private readonly logger = new Logger(AllExceptionsFilter.name);
-
-  catch(exception: unknown, host: ArgumentsHost) {
-    const ctx = host.switchToHttp();
-    const response = ctx.getResponse();
-    const request = ctx.getRequest();
-
-    const status =
-      exception instanceof HttpException
-        ? exception.getStatus()
-        : HttpStatus.INTERNAL_SERVER_ERROR;
-
-    this.logger.error(`${request.method} ${request.url} - ${status}`, exception instanceof Error ? exception.stack : '');
-
-    response.status(status).json({
-      statusCode: status,
-      timestamp: new Date().toISOString(),
-      path: request.url,
-    });
+export class AllExceptionsFilter extends BaseExceptionFilter {
+  override catch(exception: unknown, host: ArgumentsHost): void {
+    // report to error tracking here, then delegate
+    super.catch(exception, host);
   }
 }
+// Register with { provide: APP_FILTER, useClass: AllExceptionsFilter } so Nest injects the HTTP adapter
 ```
+
+Cross-language principles (fail fast, add context, handle each error once): [Error Handling Principles](cross-cutting/error-handling-principles.md).
 
 ---
 
-## Circular Dependencies
+## Dependency Injection & Layered Architecture
 
-### Circular references between modules
+Nest can override any provider in tests, concrete classes included, so a token is not needed for testability:
 
 ```typescript
-// ❌ Module A ↔ Module B
-@Module({ imports: [UsersModule] })
-export class OrdersModule {}
-
-@Module({ imports: [OrdersModule] })
-export class UsersModule {}
-
-// ✅ Move the shared logic into a third module
-@Module({
-  providers: [SharedService],
-  exports: [SharedService],
-})
-export class SharedModule {}
-
-@Module({ imports: [SharedModule] })
-export class OrdersModule {}
-
-@Module({ imports: [SharedModule] })
-export class UsersModule {}
+const moduleRef = await Test.createTestingModule({ providers: [UsersService, TypeOrmUserRepository] })
+  .overrideProvider(TypeOrmUserRepository)
+  .useValue(new InMemoryUserRepository())
+  .compile();
 ```
 
-### `forwardRef` is a last resort
+An interface plus a `Symbol` token (`{ provide: USER_REPOSITORY, useClass: TypeOrmUserRepository }` and `@Inject(USER_REPOSITORY) private readonly repo: UserRepository`) earns its place when several implementations exist, per tenant, per region, or in memory for local runs.
+
+A `Scope.REQUEST` provider makes every provider and controller that injects it request-scoped too, so Nest rebuilds that part of the graph for every request, and lifecycle hooks never run on those instances. Keep providers singletons and carry per-request context in `AsyncLocalStorage`, for example with `nestjs-cls`, which the NestJS docs present as an alternative to request-scoped providers ([ALS in Node.js](nodejs.md#async-error-handling)).
 
 ```typescript
-// ⚠️ forwardRef signals a design problem; redesign first
-@Module({
-  imports: [forwardRef(() => UsersModule)],
-})
-export class OrdersModule {}
-
-// ✅ Redesign to remove the cycle:
-// 1. Extract a shared module
-// 2. Use events (EventEmitter) instead of direct calls
-// 3. Move the shared logic up into a higher-level Service
-```
-
----
-
-## Testing Patterns
-
-### Use cases can be tested without NestJS
-
-```typescript
-// ✅ No NestFactory needed: construct the handler directly
-describe('CreateUserHandler', () => {
-  let handler: CreateUserHandler;
-  let repo: InMemoryUserRepository;
-
-  beforeEach(() => {
-    repo = new InMemoryUserRepository();
-    handler = new CreateUserHandler(repo);
-  });
-
-  it('creates a user', async () => {
-    const id = await handler.execute(
-      new CreateUserCommand('user@example.com', 'Alice'),
-    );
-    expect(id).toBeDefined();
-  });
-
-  it('rejects duplicate email', async () => {
-    await handler.execute(new CreateUserCommand('user@example.com', 'Alice'));
-    await expect(
-      handler.execute(new CreateUserCommand('user@example.com', 'Bob')),
-    ).rejects.toThrow('already exists');
-  });
-});
-```
-
-### E2E tests should configure the same pipes as production
-
-```typescript
-describe('UsersController (e2e)', () => {
-  let app: INestApplication;
-
-  beforeAll(async () => {
-    const moduleFixture = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleFixture.createNestApplication();
-    // Must match the global configuration in main.ts
-    app.useGlobalPipes(
-      new ValidationPipe({
-        whitelist: true,
-        forbidNonWhitelisted: true,
-        transform: true,
-      }),
-    );
-    await app.init();
-  });
-
-  it('/POST users - valid', () => {
-    return request(app.getHttpServer())
-      .post('/users')
-      .send({ email: 'test@test.com', name: 'Test' })
-      .expect(201);
-  });
-
-  it('/POST users - extra fields rejected', () => {
-    return request(app.getHttpServer())
-      .post('/users')
-      .send({ email: 'test@test.com', name: 'Test', role: 'admin' })
-      .expect(400);
-  });
-});
-```
-
----
-
-## Lifecycle & Runtime
-
-### Enable shutdown hooks
-
-Nest runs `onModuleDestroy`, `beforeApplicationShutdown`, and `onApplicationShutdown` when `app.close()` is called, but it reacts to SIGTERM only after `app.enableShutdownHooks()`. Without that call, a rolling deploy stops the process with database pools and queue consumers still open. NestJS 12 calls these hooks by component hierarchy level, which can change their order, so re-check teardown code that relies on one provider closing before another.
-
-```typescript
-// ✅ main.ts: without enableShutdownHooks(), SIGTERM ends the process and no destroy hook runs
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  app.enableShutdownHooks();
-  await app.listen(3000);
-}
-
-// ✅ Each provider closes the connections and consumers it owns
-@Injectable()
-export class OrdersConsumer implements OnModuleDestroy {
-  constructor(private readonly queue: QueueClient) {}
-
-  async onModuleDestroy() {
-    await this.queue.close();
-  }
-}
-```
-
-> 📖 Signal handling, connection draining, and forced-exit timers: [nodejs.md](nodejs.md#process-lifecycle--graceful-shutdown).
-
-### Request-scoped providers bubble up the injection chain
-
-A `Scope.REQUEST` provider makes every provider and controller that injects it request-scoped as well, so Nest rebuilds that part of the graph for every request, and lifecycle hooks never run on those instances. Keep providers singletons and carry per-request context in `AsyncLocalStorage`, for example with `nestjs-cls`, which the NestJS docs present as an alternative to request-scoped providers.
-
-```typescript
-// ❌ OrdersService, and every controller that injects it, become request-scoped
-@Injectable({ scope: Scope.REQUEST })
-export class RequestContext {
-  constructor(@Inject(REQUEST) readonly request: Request) {}
-}
-
-@Injectable()
-export class OrdersService {
-  constructor(private readonly context: RequestContext) {}
-}
+import { randomUUID } from 'node:crypto';
+import type { Request } from 'express';
+import { ClsModule } from 'nestjs-cls';
 
 // ✅ Singletons; nestjs-cls keeps per-request values in AsyncLocalStorage
 @Module({
@@ -599,60 +186,79 @@ export class OrdersService {
       global: true,
       middleware: {
         mount: true,
-        setup: (cls, req) => cls.set('requestId', req.headers['x-request-id'] ?? randomUUID()),
+        setup: (cls, req: Request) => {
+          const incoming = req.headers['x-request-id'];
+          cls.set('requestId', typeof incoming === 'string' ? incoming : randomUUID());
+        },
       },
     }),
   ],
 })
 export class AppModule {}
-
-// Singleton services inject ClsService and read the value: this.cls.get('requestId')
+// Singleton services inject ClsService and read this.cls.get('requestId')
 ```
+
+Circular module imports (`OrdersModule` ↔ `UsersModule`) resolve by moving the shared provider into a third module both import, by publishing events instead of calling back, or by lifting the orchestration into a higher-level service; `forwardRef()` is the last resort and needs a design note.
 
 ---
 
-## Review Checklist
+## Module Organization
 
-### Layered architecture
-- [ ] ORM/Prisma clients are not injected directly into Controllers
-- [ ] No business logic in Controllers
-- [ ] Repositories do not inject each other
-- [ ] Services have ≤ 8 dependencies (split into use cases beyond that)
+These are house conventions: apply them only when the repository already follows them.
 
-### Dependency injection
-- [ ] Interfaces + Symbol tokens are used for swappable dependencies
-- [ ] No `forwardRef()` (if there is one, a design note explains why)
-- [ ] Scoped services are not injected into singletons (request scope bubbles up to every consumer)
+- Layering: controllers delegate to services, services own business rules and orchestration, and repositories wrap data access without injecting each other.
+- A service whose dependency list keeps growing splits into use-case services (one operation per class), measured against the repository's own threshold rather than a fixed number.
+- Folders: `common/` holds guards, filters, interceptors, and decorators with no business logic; `core/` holds configuration, database, and queue setup; `integrations/` wraps one external service per directory; `modules/<feature>/` holds DTOs, repositories, services, the controller, and the module.
+- Domain classes stay framework-free where the repository separates domain from persistence; ORM entities (TypeORM, MikroORM) and Mongoose schemas are decorated by design.
 
-### Validation
-- [ ] Every `@ValidateNested()` has a matching `@Type()`
-- [ ] A global `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true })` is configured
-- [ ] No `@Body() body: any`; a DTO is required
-- [ ] Create and Update use different DTOs (`PartialType`)
-- [ ] Array validation uses `{ each: true }`
-- [ ] Optional nested objects use `@IsOptional()` + `@ValidateNested()` + `@Type()`
+---
 
-### Guard / Interceptor / Pipe
-- [ ] Guards only check authorization and do not query the database
-- [ ] Interceptors only handle cross-cutting concerns (logging, caching, response mapping)
-- [ ] Business rules live in Services
+## Testing Patterns
 
-### Error handling
-- [ ] No `catch { return null }`; meaningful exceptions are thrown
-- [ ] NestJS built-in exception classes are used
-- [ ] Custom exception filters live in `common/filters/`
+```typescript
+describe('UsersController (e2e)', () => {
+  let app: INestApplication;
 
-### Modules
-- [ ] No circular module imports
-- [ ] Domain entities have no framework decorators (`@Injectable`, etc.)
-- [ ] External service calls live in `integrations/`
+  beforeAll(async () => {
+    // AppModule provides the ValidationPipe, guards, and filters (APP_PIPE, APP_GUARD, APP_FILTER),
+    // so the test runs the production configuration without copying it
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    app = moduleRef.createNestApplication();
+    await app.init();
+  });
 
-### Testing
-- [ ] Use-case services can be tested without NestJS
-- [ ] E2E tests configure the same global Pipes/Guards as production
-- [ ] Domain entities have zero framework dependencies
+  afterAll(async () => {
+    await app.close(); // releases servers and pools; open handles keep the runner alive
+  });
 
-### Lifecycle
-- [ ] `main.ts` calls `app.enableShutdownHooks()`
-- [ ] Providers that own connections, pools, or consumers release them in `onModuleDestroy` or `onApplicationShutdown`
-- [ ] Any `Scope.REQUEST` provider is justified; per-request context otherwise comes from `AsyncLocalStorage` (for example `nestjs-cls`)
+  it('rejects unknown fields', async () => {
+    await request(app.getHttpServer())
+      .post('/users')
+      .send({ email: 'ann@example.com', name: 'Ann', role: 'admin' })
+      .expect(400);
+  });
+});
+```
+
+Configuration applied only in `main.ts` (`app.useGlobalPipes(...)`) is missing from such tests unless both call one shared setup function. Use-case classes can be unit-tested without Nest: `new CreateUserHandler(new InMemoryUserRepository())`.
+
+---
+
+## Lifecycle & Runtime
+
+### Enable shutdown hooks
+
+Nest runs `onModuleDestroy`, `beforeApplicationShutdown`, and `onApplicationShutdown` when `app.close()` is called, but reacts to `SIGTERM` only after `app.enableShutdownHooks()`; without it, a rolling deploy stops the process with pools and consumers still open. NestJS 12 calls lifecycle hooks by component hierarchy level, which can change their order, so re-check teardown that relies on one provider closing before another.
+
+In `main.ts`, call `app.enableShutdownHooks()` before `app.listen()`, and let each provider close what it owns (`async onModuleDestroy() { await this.queue.close(); }`). Signal handling, connection draining, and forced-exit timers: [nodejs.md](nodejs.md#process-lifecycle--graceful-shutdown).
+
+### NestJS 12 changes
+
+Core packages ship as ESM only (CommonJS applications load them through `require(esm)`); Jest can load them only on Node.js 24.9 or later (older versions fail with `ERR_REQUIRE_ASYNC_MODULE`), and new ESM projects default to Vitest. Applications need Node.js 20.19+ or 22.12+. Generated projects lint with Oxlint, the CLI moves to TypeScript 6, and `nest build` with its Swagger and GraphQL plugins uses the TypeScript API, so builds stay on TypeScript 6 while TypeScript 7 checks types ([typescript.md](typescript.md#check-tooling-before-upgrading-to-typescript-7)). TypeScript settings Nest needs (`experimentalDecorators`, `emitDecoratorMetadata`, `strictPropertyInitialization: false`, no `erasableSyntaxOnly`) are covered in [typescript.md](typescript.md#modern-typescript-features).
+
+---
+
+## References
+
+- [NestJS documentation](https://docs.nestjs.com/)
+- [NestJS migration guide](https://docs.nestjs.com/migration-guide)

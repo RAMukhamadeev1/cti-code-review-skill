@@ -1,190 +1,54 @@
 # N+1 Queries: Cross-Language Guide
 
-> N+1 queries are the most common performance anti-pattern in ORMs and data-access layers. This guide covers the problem definition, detection methods, general solutions, and code examples for JavaScript/TypeScript (Prisma, TypeORM, GraphQL DataLoader), Python (SQLAlchemy), and Salesforce Apex (SOQL, LWC, Flow).
+> One query loads N parents, then a loop, a resolver, or a child component runs one more query per parent. This guide owns N+1 for SQLAlchemy, Prisma, TypeORM, GraphQL DataLoader, and Salesforce (Apex, LWC, Flow).
+> Related: [Performance Review Guide](../performance-review-guide.md#database-performance) · Salesforce limit numbers: [Governor Limits](../salesforce/platform.md#governor-limits)
 
-## Table of Contents
+## Review Checklist
 
-- [Problem Definition](#problem-definition)
-- [Performance Impact](#performance-impact)
-- [Detection](#detection)
-- [General Solutions](#general-solutions)
-- [Language-Specific Implementations](#language-specific-implementations)
-- [Review Checklist](#review-checklist)
+Read this checklist first; open a section only when the diff contains its pattern.
 
----
+### Queries per item → [Language-Specific Implementations](#language-specific-implementations)
 
-## Problem Definition
+- [ ] No query, lazy relation access, remote call, or Apex/Flow data element runs once per element of a collection that grows with data or with the caller's input (list endpoints, resolvers, trigger chunks, batch scopes, imports).
+- [ ] Related rows are loaded with their parents (eager loading) or with one batched `IN` query, then looked up in a map keyed by id.
+- [ ] Not a finding: a loop over a small, fixed set (a few configuration rows, enum values), or a loop that has to be sequential (cursor pagination, ordered writes).
+- [ ] Severity: 🟡 by default; 🔴 when the collection is unbounded on a request, job, or import path. Salesforce loops follow [row 1 of Severity Calibration](../salesforce/platform.md#severity-calibration) (🔴) and state the limit math.
 
-An N+1 query happens when **one query fetches N records and a loop then triggers N more queries** to fetch the related data.
+### ORM specifics → [Python / SQLAlchemy](#python--sqlalchemy) · [TypeScript / Prisma](#typescript--prisma) · [TypeORM](#typeorm)
 
-```
-Request flow:
-  1 query   → fetch N parent records
-  N queries → one query per parent record for its related data
-  ─────────
-  Total: 1 + N queries
-```
+- [ ] SQLAlchemy: relationships read in a loop are loaded with `selectinload` (collections, or any relationship) or `joinedload` (many-to-one); `joinedload` of a collection needs `.unique()` on the result.
+- [ ] SQLAlchemy with `AsyncSession`: relationships are loaded eagerly, because an implicit lazy load raises instead of querying.
+- [ ] Prisma: relations come from `include` or a nested `select` on the parent query, not from a `findMany` per parent.
+- [ ] TypeORM: `await entity.relation` in a loop queries only for a lazy relation (typed `Promise<T>`); an unloaded regular relation is `undefined`, a correctness bug rather than an N+1.
 
-### Why it hurts
+### GraphQL → [Node.js / GraphQL DataLoader](#nodejs--graphql-dataloader)
 
-| Problem | Impact |
-|------|------|
-| **Query count grows linearly** | 100 records = 101 SQL queries; 1,000 records = 1,001 |
-| **Network latency adds up** | Every query pays a round trip (RTT); N round trips >> 1 batched query |
-| **Connection pool exhaustion** | A flood of queries ties up database connections and slows down the whole application |
-| **Hard to spot in development** | Development data sets are small, so N+1 goes unnoticed; performance collapses at production data volumes |
+- [ ] Field resolvers that fetch per parent go through a DataLoader, and loaders are created per request, never at module level.
+- [ ] The batch function returns one result per key, in key order.
 
----
+### Salesforce → [Salesforce (Apex, LWC, Flow)](#salesforce-apex-lwc-flow)
 
-## Performance Impact
+- [ ] Apex: no SOQL inside a loop; Ids are collected first and one query fills a `Map` (PMD `OperationWithLimitsInLoop`).
+- [ ] LWC: the list's data comes from one Apex call in the parent, not one call per row or per child component.
+- [ ] Flow: no Get Records, Create/Update/Delete Records, or Apex action inside a Loop element.
 
-### Scenario: fetching 100 users and their orders
+### Tests and evidence → [Detection](#detection)
 
-| Approach | SQL queries | Latency (assuming RTT = 1 ms) | When to use |
-|------|----------|---------------------|---------|
-| N+1 lazy loading | 101 | ~101 ms | Very small data sets only |
-| Eager loading (JOIN) | 1 | ~1 ms | One-to-many, moderate data volume |
-| Eager loading (IN) | 2 | ~2 ms | Many-to-many, large data sets |
-| DataLoader / batch | 2 | ~2 ms | GraphQL / complex graph queries |
-
-### SQL query count comparison
-
-```sql
--- ❌ N+1: 1 + 100 = 101 queries
-SELECT * FROM users;                          -- 1 query
-SELECT * FROM orders WHERE user_id = 1;       -- query 2
-SELECT * FROM orders WHERE user_id = 2;       -- query 3
-...
-SELECT * FROM orders WHERE user_id = 100;     -- query 101
-
--- ✅ Batch: 2 queries
-SELECT * FROM users;
-SELECT * FROM orders WHERE user_id IN (1,2,...,100);
-```
+- [ ] When the diff adds a list path or changes how relations load, a test pins the query count; suggest one as 🟢 when it is missing.
+- [ ] Query logs, traces, and debug logs are not in the diff: ask the author for them when the count depends on runtime data.
 
 ---
 
 ## Detection
 
-### 1. ORM SQL logs
+The query usually hides in an attribute access (`order.customer`), an awaited helper (`await getUser(id)`), or a component rendered once per row, so read each loop body. Grep-tool patterns that find candidates:
 
-Turn on SQL logging and watch the query count in tests or in development:
+- Python: `session\.(execute|scalars|get|query)\(` and Django `\.objects\.(get|filter)\(`
+- JavaScript/TypeScript: `await [^;]*\.(findMany|findUnique|findFirst|findOne|findOneBy)\(`
+- Apex: `\[\s*SELECT` and `Database\.query`, then check whether the hit sits inside a `for` loop
+- LWC: `@salesforce/apex/` imports in components that a parent renders per row
 
-```python
-# SQLAlchemy
-import logging
-logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
-# or: engine = create_engine(url, echo=True)
-```
-
-```typescript
-// Prisma: print every query (adapter is the driver adapter, required from Prisma ORM 7)
-const prisma = new PrismaClient({ adapter, log: ['query'] });
-
-// TypeORM: log SQL (logging: ['query'] limits the output to queries)
-const dataSource = new DataSource({
-    type: 'postgres',
-    url: process.env.DATABASE_URL,
-    entities: [User, Post],
-    logging: true,
-});
-```
-
-### 2. Query-count assertions
-
-Assert the number of SQL queries in tests:
-
-```python
-# SQLAlchemy: count statements with a cursor event, then remove the listener
-from contextlib import contextmanager
-
-from sqlalchemy import event, select
-from sqlalchemy.orm import joinedload
-
-
-@contextmanager
-def count_queries(engine):  # for an AsyncEngine, pass engine.sync_engine
-    statements: list[str] = []
-
-    @event.listens_for(engine, "before_cursor_execute")
-    def on_execute(conn, cursor, statement, parameters, context, executemany):
-        statements.append(statement)
-
-    try:
-        yield statements
-    finally:
-        event.remove(engine, "before_cursor_execute", on_execute)
-
-
-with count_queries(engine) as statements:
-    session.scalars(select(User).options(joinedload(User.profile))).all()
-assert len(statements) <= 2  # expect at most 2 queries
-```
-
-```typescript
-// Prisma: emit query events and count them
-const prisma = new PrismaClient({ adapter, log: [{ emit: 'event', level: 'query' }] });
-let queryCount = 0;
-prisma.$on('query', () => {
-    queryCount += 1;
-});
-
-it('loads users with their posts in at most 2 queries', async () => {
-    queryCount = 0;
-    await prisma.user.findMany({ include: { posts: true } });
-    expect(queryCount).toBeLessThanOrEqual(2);
-});
-```
-
-```apex
-// Apex test: accountIds holds 200 test Accounts, so a per-record query would show up
-Integer before = Limits.getQueries();
-AccountService.loadContacts(accountIds);
-Assert.isTrue(Limits.getQueries() - before <= 2, 'expected at most 2 queries');
-```
-
-### 3. APM / database monitoring tools
-
-- **ORM query logs**: per-request query counts in development and tests (SQLAlchemy `echo`, Prisma `log`, TypeORM `logging`)
-- **OpenTelemetry database spans**: database instrumentation records every query as a child span of the request, so a run of identical spans stands out
-- **APM (Datadog, New Relic)**: slow-query alerts and N+1 detection in production
-- **Salesforce**: the review is static, so ask the author for a debug log or test output that shows the SOQL query count at bulk volume
-
----
-
-## General Solutions
-
-### Solution 1: Eager loading (JOIN)
-
-Fetch the parent records and their related records in one JOIN query. Suits one-to-one and one-to-many relationships; for large or multiple collections the JOIN repeats every parent row, so prefer Solution 2 there.
-
-### Solution 2: Batch fetching (IN clause)
-
-Two queries: the parent records, then `WHERE id IN (...)` to fetch all related records at once. Suits many-to-many relationships and large data sets.
-
-### Solution 3: DataLoader pattern
-
-In GraphQL or other complex graph queries, collect every ID that is needed and merge them into one batch query.
-
-```
-// DataLoader pseudocode
-class DataLoader<K, V> {
-    load(K key) → V         // register the need; do not query yet
-    loadAll([K]) → [V]      // merge into one batch query
-}
-```
-
-### Solution 4: Projection
-
-Query only the fields you need, to cut the amount of data transferred:
-
-```sql
--- ❌ Fetches every column
-SELECT * FROM users JOIN profiles ON ...
-
--- ✅ Projects only the fields you need
-SELECT u.name, p.avatar_url FROM users u JOIN profiles p ON ...
-```
+To pin the fix, suggest a test that counts queries around the call: in SQLAlchemy, a `before_cursor_execute` listener added with `event.listens_for(engine, ...)` and removed with `event.remove` (for an `AsyncEngine`, use `engine.sync_engine`); in Prisma, `log: [{ emit: 'event', level: 'query' }]` with `prisma.$on('query', ...)`; in Apex, `Limits.getQueries()` before and after the call on 200 test records.
 
 ---
 
@@ -200,43 +64,44 @@ from sqlalchemy.orm import joinedload, raiseload, selectinload
 for order in session.scalars(select(Order)).all():
     print(order.customer.name)
 
-# selectinload: batch loading with an IN clause (recommended for async code)
-stmt = select(Order).options(selectinload(Order.customer))
+# ✅ Many-to-one: one JOIN
+orders = session.scalars(select(Order).options(joinedload(Order.customer))).all()
 
-# joinedload: loading with a JOIN
-stmt = select(Order).options(joinedload(Order.customer))
+# ✅ Collections: one extra SELECT ... WHERE ... IN (...) for all parents
+customers = session.scalars(select(Customer).options(selectinload(Customer.orders))).all()
 
-# 💡 raiseload turns any accidental lazy load into an error, so N+1 fails fast in tests
-stmt = select(Order).options(selectinload(Order.customer), raiseload("*"))
+# ✅ raiseload("*") turns every other lazy load into an error, so a new N+1 fails in tests
+stmt = select(Order).options(joinedload(Order.customer), raiseload("*"))
 ```
+
+With a raw DB-API cursor, batch the ids into one query: on PostgreSQL, `WHERE id = ANY(%s)` with a Python list works in psycopg 2 and 3, while `IN %s` with a tuple works only in psycopg 2 and fails on an empty tuple. Skip the query when the list is empty.
 
 ### TypeScript / Prisma
 
 ```typescript
-// ❌ N+1
+// ❌ N+1: one query per user
 const users = await prisma.user.findMany();
 for (const user of users) {
-    user.posts = await prisma.post.findMany({ where: { userId: user.id } });
+    const posts = await prisma.post.findMany({ where: { userId: user.id } });
+    render(user, posts);
 }
 
-// ✅ include (Prisma generates a JOIN or batched queries for you)
-const users = await prisma.user.findMany({
-    include: { posts: true },
-});
-
-// ✅ Nested include
-const users = await prisma.user.findMany({
-    include: {
-        posts: {
-            include: { comments: true },
-        },
-    },
-});
+// ✅ One call loads the users with their posts
+const usersWithPosts = await prisma.user.findMany({ include: { posts: true } });
+for (const user of usersWithPosts) {
+    render(user, user.posts);
+}
 ```
+
+Prisma resolves `include` either with a database join or with one batched query per relation level, depending on the relation load strategy and the Prisma version (verify for the project). Either way, the query count no longer grows with N.
+
+### TypeORM
+
+A relation declared lazy (`posts: Promise<Post[]>`) runs a query on every `await user.posts`, so awaiting it inside a loop is an N+1. A regular relation is populated only when the query loads it (`find({ relations: { posts: true } })` or a query-builder join); reading it without loading it gives `undefined`. Check the entity definition before reporting either.
 
 ### Node.js / GraphQL DataLoader
 
-A field resolver runs once per parent object, so a list of 100 users means 100 `posts` lookups. DataLoader collects every `load()` call made in the same tick and hands them to one batch function.
+A field resolver runs once per parent object, so a list of 100 users means 100 `posts` lookups. `load()` returns a Promise, and DataLoader collects every `load()` call made in the same tick into one call of the batch function (`loadMany(keys)` is shorthand for several `load()` calls).
 
 ```javascript
 import DataLoader from 'dataloader';
@@ -266,7 +131,7 @@ Create the loaders in the per-request context factory, never at module level: Da
 
 ### Salesforce (Apex, LWC, Flow)
 
-In Apex, N+1 is a hard failure, not just a slowdown. Every SOQL query counts toward a per-transaction governor limit, and the query that crosses it throws `System.LimitException`, which cannot be caught and rolls back the transaction. Triggers, batch jobs, and data loads pass many records at once, so a query per record fails at ordinary volumes (numbers in [Governor Limits](../salesforce/platform.md#governor-limits)).
+In Apex, N+1 is a hard failure, not a slowdown: the query that crosses the per-transaction SOQL limit throws `System.LimitException`, which cannot be caught and rolls back the transaction. Triggers, batch jobs, and data loads pass many records at once, so a query per record fails at ordinary volumes ([Governor Limits](../salesforce/platform.md#governor-limits)).
 
 ```apex
 public with sharing class OpportunityCreditCheck {
@@ -296,85 +161,13 @@ public with sharing class OpportunityCreditCheck {
             }
         }
     }
-
-    // ✅ Parent-to-child: a subquery returns each Account with its Contacts in one query
-    public static List<String> contactEmails(Set<Id> accountIds) {
-        List<String> emails = new List<String>();
-        for (Account acc : [
-            SELECT Id, (SELECT Email FROM Contacts WHERE Email != null)
-            FROM Account
-            WHERE Id IN :accountIds
-            WITH USER_MODE
-        ]) {
-            for (Contact con : acc.Contacts) {
-                emails.add(con.Email);
-            }
-        }
-        return emails;
-    }
 }
 ```
 
-Static analysis: PMD `OperationWithLimitsInLoop`.
+Parent-to-child data can come from the same query: a subquery such as `SELECT Id, (SELECT Email FROM Contacts) FROM Account WHERE Id IN :accountIds` returns each parent with its children.
 
-The same shape appears in Lightning Web Components as round trips: one imperative Apex call per row means N server calls instead of one. A child component per row that calls Apex (imperatively or through its own `@wire`) hides the same problem; load the data once in the parent and pass it down.
+In Lightning Web Components the same shape appears as round trips: one imperative Apex call per row, or a child component per row that calls Apex (imperatively or through its own `@wire`), turns N rows into N server calls. Load the list's data with one cacheable call in the parent and pass it down ([LWC: Performance](../salesforce/lwc.md#performance)).
 
-```javascript
-import { LightningElement, api, wire } from 'lwc';
-import getOpenTotal from '@salesforce/apex/InvoiceController.getOpenTotal';
-import getOpenTotals from '@salesforce/apex/InvoiceController.getOpenTotals';
+In Flow, the equivalent is a data element inside a Loop: every Get Records, Create/Update/Delete Records, or Apex action inside the loop runs once per iteration. Query once before the loop, collect changes with Assignment elements, and write once after it ([Bulk-safe flow design](../salesforce/flows.md#bulk-safe-design)).
 
-export default class AccountTotals extends LightningElement {
-    @api accountIds = [];
-
-    // ❌ One Apex call per row: N sequential server round trips
-    async loadTotalsOneByOne() {
-        const totals = {};
-        for (const accountId of this.accountIds) {
-            totals[accountId] = await getOpenTotal({ accountId });
-        }
-        return totals;
-    }
-
-    // ✅ One cacheable call for the whole list; the Apex method returns Map<Id, Decimal>
-    @wire(getOpenTotals, { accountIds: '$accountIds' })
-    totals;
-}
-```
-
-In Flow, the equivalent is a data element inside a Loop: every Get Records, Create/Update/Delete Records, or Apex action inside the loop runs once per iteration.
-
-```text
-❌ Loop over {!Opportunities}
-     → Get Records: Account where Id = {!Loop.AccountId}   (one query per iteration)
-     → Update Records: {!Loop}                             (one DML statement per iteration)
-
-✅ Get Records: the related Accounts, once, before the loop
-   Loop over {!Opportunities}
-     → Assignment: set the fields, add {!Loop} to {!OpportunitiesToUpdate}
-   Update Records: {!OpportunitiesToUpdate}                (one DML statement, after the loop)
-```
-
-> 📖 Depth: [Apex bulkification](../salesforce/apex.md#bulkification) · [Bulk-safe flow design](../salesforce/flows.md#bulk-safe-design) · [SOQL query shape](../salesforce/soql-sosl.md#query-shape) · [LWC data access](../salesforce/lwc.md#data-access)
-
----
-
-## Review Checklist
-
-### Detection
-- [ ] SQL logging or query-count monitoring is enabled
-- [ ] Tests assert the number of queries
-- [ ] The APM tool is configured to alert on N+1 patterns
-
-### Fixes
-- [ ] To-one relationships use JOIN eager loading (`joinedload`, Prisma `include`)
-- [ ] To-many relationships use IN batch loading (`selectinload`, DataLoader)
-- [ ] No database queries are triggered inside loops
-- [ ] Projections fetch only the fields that are needed
-- [ ] Apex/Flow: no SOQL or data elements inside loops; related data loaded with one query into a Map
-- [ ] LWC: one Apex call loads the data for the whole list, not one call per row or per child component
-
-### Architecture
-- [ ] List APIs paginate, so one request never loads too many records
-- [ ] GraphQL resolvers use DataLoader, with new loader instances per request
-- [ ] A caching strategy (for example, Redis) serves frequently read related data
+> 📖 Depth: [Apex bulkification](../salesforce/apex.md#bulkification) · [SOQL query shape](../salesforce/soql-sosl.md#query-shape) · [LWC data access](../salesforce/lwc.md#data-access)

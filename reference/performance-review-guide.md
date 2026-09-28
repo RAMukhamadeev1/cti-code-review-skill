@@ -1,232 +1,91 @@
 # Performance Review Guide
 
-A performance review guide covering the frontend, backend, database, algorithmic complexity, API performance, and Salesforce governor limits.
+> Performance defects a diff can show: work that grows with input size, extra round trips, unbounded memory, render-path costs, and Salesforce governor-limit use. Measurements (Core Web Vitals, latency, query plans, bundle size) need runtime evidence, so ask the author for them instead of estimating.
+> Related: [N+1 Queries](cross-cutting/n-plus-one-queries.md) · JavaScript runtime details in [javascript.md](javascript.md) · limit numbers in [Governor Limits](salesforce/platform.md#governor-limits)
 
-## Table of Contents
+## Review Checklist
 
-- [Frontend Performance (Core Web Vitals)](#frontend-performance-core-web-vitals)
-- [JavaScript Performance](#javascript-performance)
-- [Memory Management](#memory-management)
-- [Database Performance](#database-performance)
-- [API Performance](#api-performance)
-- [Algorithmic Complexity](#algorithmic-complexity)
-- [Salesforce Platform Performance](#salesforce-platform-performance)
-- [Performance Review Checklist](#performance-review-checklist)
-- [Performance Metric Thresholds](#performance-metric-thresholds)
-- [Recommended Tools](#recommended-tools)
-- [Low-Level Efficiency Anti-Patterns](#low-level-efficiency-anti-patterns)
-- [References](#references)
+Read this checklist first; open a section only when the diff contains its pattern.
+
+### Frontend → [Frontend Performance (Core Web Vitals)](#frontend-performance-core-web-vitals)
+
+- [ ] The likely LCP image (hero, above the fold) is not `loading="lazy"`.
+- [ ] Images, videos, embeds, and ad slots the diff adds reserve their space (`width` and `height` attributes, or an `aspect-ratio` that matches the media); nothing is inserted above content after load.
+- [ ] New web fonts limit the late layout shift (`font-display: optional`, or a metric-matched fallback); `font-display: swap` shows text sooner but does not prevent the shift.
+- [ ] Event handlers the diff adds don't run long synchronous work before the next paint.
+
+### Bundles and rendering → [JavaScript Performance](#javascript-performance)
+
+- [ ] Heavy, rarely used modules are loaded with dynamic `import()` where the repo already code-splits; a static import is not a finding on its own.
+- [ ] Large libraries are imported by path or named export where they support it; ask the author for bundle-analyzer output when a new dependency looks large.
+- [ ] Lists that grow with user data paginate or virtualize; a short, bounded list is not a finding.
+- [ ] Listeners, timers, observers, and subscriptions the diff creates are removed on teardown.
+
+### Database → [Database Performance](#database-performance)
+
+- [ ] No query per item in a loop ([N+1 Queries](cross-cutting/n-plus-one-queries.md)).
+- [ ] Queries on tables that grow are bounded, and paginated queries have a deterministic `ORDER BY`.
+- [ ] New predicates on large tables don't wrap the column in a function, lead with a `%` wildcard, or negate it, unless a matching index exists. Whether an index exists needs the migrations or `EXPLAIN` output: check the diff, or ask the author.
+
+### API → [API Performance](#api-performance)
+
+- [ ] List endpoints paginate with a capped page size.
+- [ ] Caches have an expiry, an invalidation path on writes, and keys that include every input that changes the result (user, tenant, locale).
+- [ ] ETags change when the representation changes; per-user responses are never `Cache-Control: public`.
+- [ ] Compression and rate limiting: check where the repo configures them (middleware, proxy, gateway) before reporting that a new endpoint lacks them.
+
+### Algorithms and efficiency → [Algorithmic Complexity](#algorithmic-complexity) · [Low-Level Efficiency Anti-Patterns](#low-level-efficiency-anti-patterns)
+
+- [ ] Loops over two data-sized collections use a `Set` or `Map` instead of a nested scan; the finding states the input sizes.
+- [ ] Loop-invariant work (file reads, parsing, regex compilation, describe calls) is hoisted out of loops.
+- [ ] Independent I/O calls aren't awaited one after another.
+- [ ] Import-time and per-request initialization do no heavy I/O.
+- [ ] Module-level caches, maps, and queues have a size bound or a TTL.
+
+### Salesforce → [Salesforce Platform Performance](#salesforce-platform-performance)
+
+- [ ] No SOQL, DML, callout, or enqueue inside a loop (Apex loops or Flow Loop elements), with the limit math stated.
+- [ ] Queries on large objects filter on selective, indexed fields; ask the author for Query Plan output when selectivity is unclear.
+- [ ] Nested loops over two collections use a `Map` keyed by Id.
+- [ ] Read-only Apex methods called from LWC are `cacheable=true`, and writes refresh the cache.
+- [ ] Updates to the triggering record use a before-save flow or a before trigger.
+
+### Severity → [Severity Calibration](salesforce/platform.md#severity-calibration)
+
+- [ ] 🔴 only for failure at realistic volume: a governor-limit breach (row 1 of the calibration table), an unbounded query or response on a request path, an N+1 on a list that grows with data, or memory that grows without bound in a long-running process.
+- [ ] 🟡 for costs that grow with data or traffic without failing; 🟢 or 💡 for micro-optimizations and style (`transition: all`, image formats, a suggested bundle analysis).
+- [ ] Every finding names the input size or volume that makes it matter.
 
 ---
 
 ## Frontend Performance (Core Web Vitals)
 
-### Core metrics (2024)
-
-| Metric | Full name | Target | What it measures |
-|------|------|--------|------|
-| **LCP** | Largest Contentful Paint | ≤ 2.5s | Time to render the largest content element |
-| **INP** | Interaction to Next Paint | ≤ 200ms | Interaction responsiveness (replaced FID in 2024) |
-| **CLS** | Cumulative Layout Shift | ≤ 0.1 | Unexpected layout movement |
-| **FCP** | First Contentful Paint | ≤ 1.8s | Time to the first rendered content |
-| **TBT** | Total Blocking Time | ≤ 200ms | Time the main thread is blocked |
-
-### LCP checks
-
-```javascript
-// ❌ Lazy-loading the LCP image delays critical content
-<img src="hero.jpg" loading="lazy" />
-
-// ✅ Load the LCP image immediately
-<img src="hero.jpg" fetchpriority="high" />
-
-// ❌ Unoptimized image format
-<img src="hero.png" />  // PNG file is too large
-
-// ✅ Modern image formats + responsive images
-<picture>
-  <source srcset="hero.avif" type="image/avif" />
-  <source srcset="hero.webp" type="image/webp" />
-  <img src="hero.jpg" alt="Hero" />
-</picture>
-```
-
-**Review points:**
-- [ ] Does the LCP element set `fetchpriority="high"`?
-- [ ] Are WebP/AVIF formats used?
-- [ ] Is there server-side rendering or static generation?
-- [ ] Is the CDN configured correctly?
-
-### FCP checks
+Core Web Vitals are LCP, INP, and CLS; "good" is LCP ≤ 2.5 s, INP ≤ 200 ms, and CLS ≤ 0.1 at the 75th percentile of page loads. INP replaced FID in March 2024. FCP and TBT are diagnostics, not Core Web Vitals. None of them can be measured from a diff: when a finding depends on them, ask for Lighthouse or field data.
 
 ```html
-<!-- ❌ Render-blocking CSS -->
-<link rel="stylesheet" href="all-styles.css" />
+<!-- ❌ The LCP image waits for lazy loading, and its box has no size until the file arrives -->
+<img src="hero.jpg" loading="lazy" alt="Spring collection">
 
-<!-- ✅ Inline the critical CSS + load the rest asynchronously -->
-<style>/* Critical above-the-fold styles */</style>
-<link rel="preload" href="styles.css" as="style" onload="this.onload=null;this.rel='stylesheet'" />
-
-<!-- ❌ Render-blocking font -->
-@font-face {
-  font-family: 'CustomFont';
-  src: url('font.woff2');
-}
-
-<!-- ✅ Optimized font display -->
-@font-face {
-  font-family: 'CustomFont';
-  src: url('font.woff2');
-  font-display: swap;  /* Show a system font first, swap once the font loads */
-}
+<!-- ✅ Load it eagerly with high priority, and reserve its box with intrinsic dimensions -->
+<img src="hero.jpg" fetchpriority="high" width="1600" height="900" alt="Spring collection">
 ```
-
-### INP checks
-
-```javascript
-// ❌ A long task blocks the main thread
-button.addEventListener('click', () => {
-  // 500ms of synchronous work
-  processLargeData(data);
-  updateUI();
-});
-
-// ✅ Split long tasks
-const yieldToMain = () => globalThis.scheduler?.yield?.() ?? new Promise((resolve) => setTimeout(resolve, 0));
-
-button.addEventListener('click', async () => {
-  // Yield to the main thread
-  await yieldToMain();
-
-  // Process in chunks
-  for (const chunk of chunks) {
-    processChunk(chunk);
-    await yieldToMain();
-  }
-  updateUI();
-});
-
-// ✅ Use a Web Worker for heavy computation
-const worker = new Worker('heavy-computation.js');
-worker.postMessage(data);
-worker.onmessage = (e) => updateUI(e.data);
-```
-
-### CLS checks
 
 ```css
-/* ❌ Media without dimensions */
-img { width: 100%; }
-
-/* ✅ Reserve the space */
-img {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-}
-
-/* ❌ Dynamically inserted content shifts the layout */
-.ad-container { }
-
-/* ✅ Reserve a fixed height */
-.ad-container {
-  min-height: 250px;
-}
+/* ✅ Scale images to the container while keeping the ratio from the width and height attributes */
+img { max-width: 100%; height: auto; }
 ```
 
-**CLS checklist:**
-- [ ] Do images/videos have width/height or aspect-ratio?
-- [ ] Does font loading use `font-display: swap`?
-- [ ] Is space reserved for dynamic content?
-- [ ] Is inserting content above existing content avoided?
-
----
+- **Fonts.** `font-display: swap` shows fallback text at once, then shifts the layout when the web font arrives, unless a fallback `@font-face` matches its metrics (`size-adjust`, `ascent-override`). `font-display: optional` avoids the late swap. Swap gets text on screen sooner; it is not a CLS fix.
+- **Late content.** Reserve space for content inserted after load (ads, embeds, banners), for example with `min-height`, and don't insert it above what the user is reading.
+- **Responsiveness (INP).** A handler that runs long synchronous work delays the next paint; split the work and yield between chunks, or move it to a worker ([Don't block the event loop or main thread](javascript.md#dont-block-the-event-loop-or-main-thread)).
+- **Animations.** Animating `width`, `height`, `top`, or `left` runs layout on every frame, where `transform` and `opacity` usually don't; `transition: all` animates properties nobody meant to. Both are 🟢 unless the animation runs on a hot interaction.
 
 ## JavaScript Performance
 
-### Code splitting and lazy loading
-
-```javascript
-// ❌ Load all code up front
-import { HeavyChart } from './charts';
-import { PDFExporter } from './pdf';
-import { AdminPanel } from './admin';
-
-// ✅ Load on demand, inside the handler that needs it
-exportButton.addEventListener('click', async () => {
-  try {
-    const { exportPdf } = await import('./pdf.js');
-    await exportPdf(report);
-  } catch (error) {
-    showError(error);
-  }
-});
-
-// ✅ Route-level code splitting (router-agnostic)
-const routes = {
-  '/dashboard': () => import('./pages/dashboard.js'),
-  '/admin': () => import('./pages/admin.js'),
-};
-// The router awaits routes[path]() on navigation, so each page ships as its own chunk
-```
-
-> 📖 See [Dynamic import() and code splitting](javascript.md#dynamic-import-and-code-splitting) in the JavaScript Guide.
-
-### Bundle size optimization
-
-```javascript
-// ❌ Import the entire library
-import _ from 'lodash';
-import moment from 'moment';
-
-// ✅ Import only what you use
-import debounce from 'lodash/debounce';
-import { format } from 'date-fns';
-
-// ❌ Defeats tree shaking
-export default {
-  fn1() {},
-  fn2() {},  // unused, but still bundled
-};
-
-// ✅ Named exports support tree shaking
-export function fn1() {}
-export function fn2() {}
-```
-
-**Bundle checklist:**
-- [ ] Is dynamic import() used for code splitting?
-- [ ] Are large libraries imported selectively?
-- [ ] Has the bundle size been analyzed? (webpack-bundle-analyzer)
-- [ ] Are there unused dependencies?
-
-### List rendering
-
-Paginate or virtualize long lists. When rows are built by hand, create them with `createElement` and `textContent`, collect them in a `DocumentFragment`, and swap them in with one `replaceChildren` call.
-
-```javascript
-// ❌ Render the whole list at once
-function renderList(list, items) {
-  for (const item of items) {
-    const li = document.createElement('li');
-    li.textContent = item.name;
-    list.append(li);
-  }  // 10,000 items = 10,000 DOM nodes
-}
-
-// ✅ Paginate: render one page of rows in a single DOM update
-function renderPage(list, items, page, pageSize = 50) {
-  const fragment = document.createDocumentFragment();
-  for (const item of items.slice(page * pageSize, (page + 1) * pageSize)) {
-    const li = document.createElement('li');
-    li.textContent = item.name;
-    fragment.append(li);
-  }
-  list.replaceChildren(fragment);
-}
-
-// ✅ Thousands of rows in one scrolling view: use a virtual-scrolling library that renders only the visible rows
-// (in LWC, lightning-datatable with enable-infinite-loading loads more rows as the user scrolls)
-```
+- **Code splitting.** Load heavy, rarely used modules (charts, PDF export, editors, admin screens) with dynamic `import()` in the handler or route that needs them, where the repo's bundler already splits chunks. Caching the load promise and handling chunk-load failures: [Dynamic import() and code splitting](javascript.md#dynamic-import-and-code-splitting).
+- **Tree shaking.** Import by path or named export where the library supports it (`import debounce from 'lodash/debounce'`, not all of `lodash`). A default export of an object literal (`export default { fn1, fn2 }`) can't be tree-shaken; named exports can ([JavaScript: Modules](javascript.md#modules)).
+- **Long lists.** Paginate or virtualize lists that grow with user data. When rows are built by hand, create them with `createElement` and `textContent`, collect them in a `DocumentFragment`, and insert them with one `replaceChildren` call. In LWC, `lightning-datatable` with `enable-infinite-loading` loads rows as the user scrolls.
+- **Memory.** Every listener, timer, observer, socket, and subscription the diff creates needs a teardown in the component's teardown hook (for example, LWC `disconnectedCallback`); one `AbortController` signal removes many listeners at once ([Clean up listeners, timers, and observers](javascript.md#clean-up-listeners-timers-and-observers)). A closure keeps everything it captures alive for as long as the closure lives.
 
 ```css
 /* ✅ Let the browser skip layout and paint for off-screen rows */
@@ -236,468 +95,100 @@ function renderPage(list, items, page, pageSize = 50) {
 }
 ```
 
-**Large data review points:**
-- [ ] Do lists with more than 100 items use pagination or virtual scrolling?
-- [ ] Do tables support pagination or virtualization?
-- [ ] Is anything rendered in full when only part of it is visible?
-
----
-
-## Memory Management
-
-### Common memory leaks
-
-Every setup needs a matching teardown. The examples pair `mount()` with `unmount()`; in a component, the teardown belongs in the framework's teardown hook (for example, LWC `disconnectedCallback`).
-
-#### 1. Event listeners that are never removed
-
-```javascript
-// ❌ The listener outlives the component
-function mount() {
-  window.addEventListener('resize', handleResize);
-}
-
-// ✅ Register with an AbortSignal and abort it on teardown
-let controller;
-
-function mount() {
-  controller = new AbortController();
-  window.addEventListener('resize', handleResize, { signal: controller.signal });
-}
-
-function unmount() {
-  controller.abort();  // removes every listener registered with this signal
-}
-```
-
-#### 2. Timers that are never cleared
-
-```javascript
-// ❌ The timer is never cleared
-function mount() {
-  setInterval(fetchData, 5000);
-}
-
-// ✅ Keep the handle and clear it on teardown
-let timer;
-
-function mount() {
-  timer = setInterval(fetchData, 5000);
-}
-
-function unmount() {
-  clearInterval(timer);
-}
-```
-
-#### 3. Closure references
-
-```javascript
-// ❌ The closure holds a reference to a large object
-function createHandler() {
-  const largeData = new Array(1000000).fill('x');
-
-  return function handler() {
-    // largeData is captured by the closure and cannot be garbage-collected
-    console.log(largeData.length);
-  };
-}
-
-// ✅ Keep only the data you need
-function createHandler() {
-  const largeData = new Array(1000000).fill('x');
-  const length = largeData.length;  // keep only the value you need
-
-  return function handler() {
-    console.log(length);
-  };
-}
-```
-
-#### 4. Subscriptions that are never closed
-
-```javascript
-// ❌ The WebSocket/EventSource is never closed
-function mount() {
-  const ws = new WebSocket('wss://...');
-  ws.onmessage = handleMessage;
-}
-
-// ✅ Close the connection on teardown
-let ws;
-
-function mount() {
-  ws = new WebSocket('wss://...');
-  ws.onmessage = handleMessage;
-}
-
-function unmount() {
-  ws.close();
-}
-```
-
-### Memory checklist
-
-```markdown
-- [ ] Does every setup (listener, timer, subscription, socket) have a matching teardown?
-- [ ] Are event listeners removed when the component is torn down?
-- [ ] Are timers cleared?
-- [ ] Are WebSocket/SSE connections closed?
-- [ ] Are large objects released promptly?
-- [ ] Do global variables accumulate data?
-```
-
-### Detection tools
-
-| Tool | Purpose |
-|------|------|
-| Chrome DevTools Memory | Heap snapshot analysis |
-| MemLab (Meta) | Automated memory-leak detection |
-| Performance Monitor | Real-time memory monitoring |
-
----
-
 ## Database Performance
 
-### The N+1 query problem
+Query-per-item loops belong to [N+1 Queries](cross-cutting/n-plus-one-queries.md#language-specific-implementations). Beyond them:
 
-```python
-from sqlalchemy import select
-from sqlalchemy.orm import joinedload, selectinload
-
-# ❌ N+1 problem - 1 + N queries
-users = session.scalars(select(User)).all()  # 1 query
-for user in users:
-    print(user.profile.bio)  # N queries (one per user)
-
-# ✅ Eager loading - one query with a JOIN
-users = session.scalars(select(User).options(joinedload(User.profile))).all()
-for user in users:
-    print(user.profile.bio)  # no extra queries
-
-# ✅ Many-to-many: selectinload adds one SELECT ... WHERE ... IN (...) query
-posts = session.scalars(select(Post).options(selectinload(Post.tags))).all()
-```
-
-```javascript
-// TypeORM example
-// ❌ N+1 problem
-const users = await userRepository.find();
-for (const user of users) {
-  const posts = await user.posts;  // runs a query on every iteration
-}
-
-// ✅ Eager Loading
-const users = await userRepository.find({
-  relations: ['posts'],
-});
-```
-
-> 📖 Detection and fixes per ORM (and for Salesforce): [N+1 Queries](cross-cutting/n-plus-one-queries.md#language-specific-implementations).
-
-### Index optimization
+- **Bounds and order.** Queries on tables that grow need a `LIMIT` or pagination. A page needs `ORDER BY` on a unique key or tiebreaker, or rows repeat and go missing between pages. Deep `OFFSET`s read and discard every skipped row; on large tables, use keyset pagination.
+- **Index use.** Whether an index exists or is used needs the schema: check migrations in the diff, or ask the author for `EXPLAIN` output. Predicates that defeat a plain B-tree index: a function on the column (`WHERE YEAR(created_at) = 2024`; rewrite it as a range or use an expression index), a leading wildcard (`LIKE '%phone%'`; needs a trigram or full-text index, and dropping the leading `%` changes which rows match), and negations. An index on a low-cardinality column such as `status` often goes unused unless the filtered value is rare; a partial or composite index that matches the query serves it better.
+- **Columns.** `SELECT *` matters when it pulls large columns (blobs, JSON, long text) through a hot path, or leaks columns added later into an API response; on a primary-key lookup it is not a finding.
 
 ```sql
--- ❌ Full table scan
-SELECT * FROM orders WHERE status = 'pending';
+-- ❌ No ORDER BY: rows can repeat or go missing between pages, and OFFSET 5000 scans the skipped rows
+SELECT id, created_at, message FROM logs WHERE type = 'error' LIMIT 100 OFFSET 5000;
 
--- ✅ Add an index
-CREATE INDEX idx_orders_status ON orders(status);
-
--- ❌ Index not used: a function is applied to the column
-SELECT * FROM users WHERE YEAR(created_at) = 2024;
-
--- ✅ A range query can use the index
-SELECT * FROM users
-WHERE created_at >= '2024-01-01' AND created_at < '2025-01-01';
-
--- ❌ Index not used: leading wildcard in LIKE
-SELECT * FROM products WHERE name LIKE '%phone%';
-
--- ✅ A prefix match can use the index
-SELECT * FROM products WHERE name LIKE 'phone%';
+-- ✅ Keyset pagination (PostgreSQL row comparison), served by an index on (type, created_at, id)
+SELECT id, created_at, message FROM logs
+WHERE type = 'error' AND (created_at, id) < (:last_created_at, :last_id)
+ORDER BY created_at DESC, id DESC
+LIMIT 100;
 ```
-
-### Query optimization
-
-```sql
--- ❌ SELECT * fetches columns you do not need
-SELECT * FROM users WHERE id = 1;
-
--- ✅ Select only the columns you need
-SELECT id, name, email FROM users WHERE id = 1;
-
--- ❌ No LIMIT on a large table
-SELECT * FROM logs WHERE type = 'error';
-
--- ✅ Paginated query
-SELECT * FROM logs WHERE type = 'error' LIMIT 100 OFFSET 0;
-
--- ❌ A query inside a loop
-for id in user_ids:
-    cursor.execute("SELECT * FROM users WHERE id = %s", (id,))
-
--- ✅ One batched query
-cursor.execute("SELECT * FROM users WHERE id IN %s", (tuple(user_ids),))
-```
-
-### Database checklist
-
-```markdown
-🔴 Must check:
-- [ ] Are there N+1 queries?
-- [ ] Are the WHERE-clause columns indexed?
-- [ ] Is SELECT * avoided?
-- [ ] Do queries on large tables have a LIMIT?
-
-🟡 Should check:
-- [ ] Was EXPLAIN used to analyze the query plan?
-- [ ] Is the column order of composite indexes correct?
-- [ ] Are there unused indexes?
-- [ ] Is the slow-query log monitored?
-```
-
----
 
 ## API Performance
 
-### Pagination
-
 ```javascript
-// ❌ Return every row
-app.get('/users', async (req, res) => {
-  const users = await User.findAll();  // may return 100,000 rows
-  res.json(users);
-});
-
-// ✅ Paginate + cap the page size
-app.get('/users', async (req, res) => {
-  const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
-  const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 20, 1), 100);  // 1 to 100
-  const offset = (page - 1) * limit;
-
-  const { rows, count } = await User.findAndCountAll({
-    limit,
-    offset,
-    order: [['id', 'ASC']],
-  });
-
-  res.json({
-    data: rows,
-    pagination: {
-      page,
-      limit,
-      total: count,
-      totalPages: Math.ceil(count / limit),
-    },
-  });
+// ✅ Cache headers for rarely changing public data; Express adds a weak ETag to res.json by default
+app.get('/countries', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.json(countries);
 });
 ```
 
-### Caching strategies
-
-```javascript
-// ✅ Redis cache example
-async function getUser(id) {
-  const cacheKey = `user:${id}`;
-
-  // 1. Check the cache
-  const cached = await redis.get(cacheKey);
-  if (cached) {
-    return JSON.parse(cached);
-  }
-
-  // 2. Query the database
-  const user = await db.users.findById(id);
-
-  // 3. Write to the cache (with an expiry)
-  await redis.setex(cacheKey, 3600, JSON.stringify(user));
-
-  return user;
-}
-
-// ✅ HTTP cache headers
-app.get('/static-data', (req, res) => {
-  res.set({
-    'Cache-Control': 'public, max-age=86400',  // 24 hours
-    'ETag': 'abc123',
-  });
-  res.json(data);
-});
-```
-
-### Response compression
-
-```javascript
-// ✅ Enable Gzip/Brotli compression
-const compression = require('compression');
-app.use(compression());
-
-// ✅ Return only the fields the client needs, checked against an allowlist
-// Request: GET /users?fields=id,name,email
-const ALLOWED_FIELDS = new Set(['id', 'name', 'email']);
-
-app.get('/users', async (req, res) => {
-  const requested = (req.query.fields?.split(',') ?? []).filter((f) => ALLOWED_FIELDS.has(f));
-  const attributes = requested.length > 0 ? requested : ['id', 'name'];
-  const users = await User.findAll({
-    attributes,
-  });
-  res.json(users);
-});
-```
-
-### Rate limiting
-
-```javascript
-// ✅ Rate limiting
-const rateLimit = require('express-rate-limit');
-
-const limiter = rateLimit({
-  windowMs: 60 * 1000,  // 1 minute
-  max: 100,             // at most 100 requests
-  message: { error: 'Too many requests, please try again later.' },
-});
-
-app.use('/api/', limiter);
-```
-
-### API checklist
-
-```markdown
-- [ ] Do list endpoints paginate?
-- [ ] Is the page size capped?
-- [ ] Is hot data cached?
-- [ ] Is response compression enabled?
-- [ ] Is there rate limiting?
-- [ ] Are only the necessary fields returned?
-```
-
----
+- **Pagination.** Parse `page` and `limit` as integers, clamp `limit` (for example, 1 to 100), and order by a unique key. A total count runs an extra `COUNT` on every request, which is costly on large tables.
+- **Caches.** Every entry has an expiry; every write path that changes the source invalidates or updates the entry; the key includes every input that changes the result (user, tenant, locale, permissions). `Cache-Control: public` is never set on per-user responses.
+- **ETags.** An ETag must change when the representation changes (a content hash or a version) and is a quoted string; a hard-coded ETag lets clients keep stale data.
+- **Compression and rate limiting.** Both are often configured once (middleware such as `compression()` and `express-rate-limit`, or the proxy or gateway); check there before reporting a new endpoint.
+- **Field selection.** Fields chosen through the query string (`?fields=`) are checked against an allowlist.
 
 ## Algorithmic Complexity
 
-### Common complexities compared
-
-| Complexity | Name | 10 items | 1,000 items | 1M items | Example |
-|--------|------|-------|---------|----------|------|
-| O(1) | Constant | 1 | 1 | 1 | Hash lookup |
-| O(log n) | Logarithmic | 3 | 10 | 20 | Binary search |
-| O(n) | Linear | 10 | 1000 | 1M | Array traversal |
-| O(n log n) | Linearithmic | 33 | 10000 | 20M | Quicksort |
-| O(n²) | Quadratic | 100 | 1M | 1 trillion | Nested loops |
-| O(2ⁿ) | Exponential | 1024 | ∞ | ∞ | Naive recursive Fibonacci |
-
-### Warning signs in code review
+Report complexity only with the input sizes that make it matter ("`orders` is the full export, up to 100k rows"). A nested loop, or `includes`, `find`, or `indexOf` inside a loop, over two data-sized collections costs O(n × m); index one side in a `Set` or `Map`. Small, bounded inputs (a few dozen items) are not a finding.
 
 ```javascript
-// ❌ O(n²) - nested loops
-function findDuplicates(arr) {
-  const duplicates = [];
-  for (let i = 0; i < arr.length; i++) {
-    for (let j = i + 1; j < arr.length; j++) {
-      if (arr[i] === arr[j]) {
-        duplicates.push(arr[i]);
-      }
-    }
-  }
-  return duplicates;
-}
+// ❌ O(n × m): includes() scans allowedIds for every order
+const visible = orders.filter((order) => allowedIds.includes(order.accountId));
 
-// ✅ O(n) - use a Set
-function findDuplicates(arr) {
-  const seen = new Set();
-  const duplicates = new Set();
-  for (const item of arr) {
-    if (seen.has(item)) {
-      duplicates.add(item);
-    }
-    seen.add(item);
-  }
-  return [...duplicates];
-}
+// ✅ O(n + m): build the Set once
+const allowed = new Set(allowedIds);
+const visibleOrders = orders.filter((order) => allowed.has(order.accountId));
 ```
 
-```javascript
-// ❌ O(n²) - includes() runs on every iteration
-function removeDuplicates(arr) {
-  const result = [];
-  for (const item of arr) {
-    if (!result.includes(item)) {  // includes is O(n)
-      result.push(item);
-    }
-  }
-  return result;
-}
+Recursion whose depth grows with the input (walking a user-supplied tree) can overflow the stack; an explicit stack or queue avoids it.
 
-// ✅ O(n) - use a Set
-function removeDuplicates(arr) {
-  return [...new Set(arr)];
-}
-```
+## Low-Level Efficiency Anti-Patterns
 
-```javascript
-// ❌ O(n) lookup - scans the array every time
-const users = [{ id: 1, name: 'A' }, { id: 2, name: 'B' }, ...];
+### Unnecessary repeated work
 
-function getUser(id) {
-  return users.find(u => u.id === id);  // O(n)
-}
+Look for the same function or query called more than once in one request or render, and for loop-invariant work inside a loop: reading and parsing a config file, compiling a regex, or building a lookup table on every iteration. Hoist it out of the loop, or compute it once and pass it down.
 
-// ✅ O(1) lookup - use a Map
-const userMap = new Map(users.map(u => [u.id, u]));
+### Missed concurrency opportunities
 
-function getUser(id) {
-  return userMap.get(id);  // O(1)
-}
-```
+Independent I/O awaited one call after another adds the latencies together. Run it concurrently when nothing depends on an earlier result: `Promise.all` in JavaScript ([JavaScript: Async & Promises](javascript.md#async--promises)), `asyncio.TaskGroup` in Python ([asyncio + TaskGroup](cross-cutting/async-concurrency-patterns.md#python-asyncio--taskgroup)). Not findings: calls that depend on each other, ordered writes, cursor pagination, and calls kept sequential to respect a rate limit. Fan-out over data-sized input needs a concurrency limit ([Limit concurrency](cross-cutting/async-concurrency-patterns.md#4-limit-concurrency)).
 
-### Space complexity
+### Hot-path bloat
 
-```javascript
-// ⚠️ O(n) space - creates a new array
-const doubled = arr.map(x => x * 2);
+- Module-level or import-time code that does heavy work (file I/O, network calls, building large objects) slows every cold start and every test run.
+- Initialization on the per-request path that could run once at startup.
+- Startup work that blocks the first request, such as a cache warm-up that could run in the background.
 
-// ✅ O(1) space - modify in place (if that is allowed)
-for (let i = 0; i < arr.length; i++) {
-  arr[i] *= 2;
-}
+### Unbounded data structures
 
-// ⚠️ Deep recursion can overflow the stack
-function factorial(n) {
-  if (n <= 1) return 1;
-  return n * factorial(n - 1);  // O(n) stack space
-}
+Global dicts, lists, caches, queues, and metric buffers need a maximum size or a TTL, and per-request objects must not stay reachable from long-lived references. Lifecycle defects (unclosed connections, listeners never removed) are in [Resource Management](common-bugs-checklist.md#resource-management).
 
-// ✅ Iterative version, O(1) space
-function factorial(n) {
-  let result = 1;
-  for (let i = 2; i <= n; i++) {
-    result *= i;
-  }
-  return result;
-}
-```
+```python
+# ❌ Unbounded cache: grows for the life of the process
+_cache: dict[str, Any] = {}
 
-### Example review comments
+# ✅ Bounded LRU
+from functools import lru_cache
+from typing import Any
 
-```markdown
-💡 "This nested loop is O(n²); it will be slow once the data grows"
-🔴 "Array.includes() inside this loop makes the whole thing O(n²); use a Set"
-🟡 "This recursion can get deep enough to overflow the stack; consider an iterative version"
+@lru_cache(maxsize=256)
+def get_cached(key: str) -> Any:
+    return expensive_computation(key)
 ```
 
 ---
 
 ## Salesforce Platform Performance
 
-On Salesforce, most performance defects surface as governor-limit exceptions rather than slow pages: the transaction fails and rolls back. Review each entry point at bulk volume and state the arithmetic in the finding. The limit numbers live in the [Salesforce Platform Guide](salesforce/platform.md#governor-limits); this section lists what to look for.
+On Salesforce, most performance defects surface as governor-limit exceptions rather than slow pages: the transaction fails and rolls back. Review each entry point at bulk volume and state the arithmetic in the finding. The limit numbers live in [Governor Limits](salesforce/platform.md#governor-limits) and the tiers in [Severity Calibration](salesforce/platform.md#severity-calibration); this section lists what to look for.
 
 ### Governor limits are the performance budget
 
 - Limits apply per transaction, and the transaction includes everything a save sets off: other triggers, record-triggered flows, and roll-up summary updates on parent records.
 - Exceeding a limit throws `System.LimitException`, which cannot be caught, so code that works on small sandbox data fails outright once data volume grows.
-- Count SOQL queries, DML statements, callouts, and enqueued jobs per invocation, not per record: trigger chunks, batch scopes, and platform-event batches all carry many records. The fixes (collect Ids, query once into a `Map`, one DML statement per object) are in [Apex: Bulkification](salesforce/apex.md#bulkification).
+- Count SOQL queries, DML statements, callouts, and enqueued jobs per invocation, not per record: trigger chunks, batch scopes, and platform-event batches all carry many records. A limit-consuming call inside a loop is row 1 of the calibration table (🔴). The fixes (collect Ids, query once into a `Map`, one DML statement per object) are in [Apex: Bulkification](salesforce/apex.md#bulkification).
 
 Static analysis: PMD `OperationWithLimitsInLoop`.
 
@@ -739,7 +230,7 @@ Static analysis: PMD `OperationWithHighCostInLoop` (describe calls in loops).
 
 ### LWC round trips and caching
 
-- Load a component's data with one Apex call that returns everything it renders; calling Apex once per row multiplies server requests and transactions.
+- Load a component's data with one Apex call that returns everything it renders; calling Apex once per row multiplies server requests and transactions ([N+1 Queries](cross-cutting/n-plus-one-queries.md#salesforce-apex-lwc-flow)).
 - Mark read-only Apex methods `@AuraEnabled(cacheable=true)` so results are cached on the client. A cacheable method must not perform DML, and wired results need `refreshApex` after a write ([The LWC-Apex Contract](salesforce/lwc.md#the-lwc-apex-contract)).
 - Prefer Lightning Data Service (`lightning-record-form`, or `getRecord` from `lightning/uiRecordApi`) for single-record reads and writes: it shares one cache across components and needs no Apex.
 - Page large tables (for example, `lightning-datatable` with `enable-infinite-loading`) and return only the fields the component shows. More in [LWC: Performance](salesforce/lwc.md#performance).
@@ -753,193 +244,8 @@ Static analysis: PMD `OperationWithHighCostInLoop` (describe calls in loops).
 
 ---
 
-## Performance Review Checklist
-
-### 🔴 Must check (blocking)
-
-**Frontend:**
-- [ ] Is the LCP image lazy-loaded? (It should not be)
-- [ ] Is `transition: all` used?
-- [ ] Are width/height/top/left animated?
-- [ ] Are lists with more than 100 items paginated or virtualized?
-
-**Backend:**
-- [ ] Are there N+1 queries?
-- [ ] Do list endpoints paginate?
-- [ ] Is SELECT * used on large tables?
-
-**Salesforce:**
-- [ ] Is there any SOQL, DML, or callout inside a loop (Apex loops or Flow Loop elements)?
-- [ ] Do queries on large objects filter on selective, indexed fields?
-
-**General:**
-- [ ] Are there nested loops that are O(n²) or worse?
-- [ ] Are event listeners, timers, and subscriptions cleaned up on teardown?
-
-### 🟡 Should check (important)
-
-**Frontend:**
-- [ ] Is code splitting used?
-- [ ] Are large libraries imported selectively?
-- [ ] Do images use WebP/AVIF?
-- [ ] Are there unused dependencies?
-
-**Backend:**
-- [ ] Is hot data cached?
-- [ ] Are the WHERE columns indexed?
-- [ ] Is there slow-query monitoring?
-
-**API:**
-- [ ] Is response compression enabled?
-- [ ] Is there rate limiting?
-- [ ] Are only the necessary fields returned?
-
-**Salesforce:**
-- [ ] Are read-only Apex methods called from LWC marked `cacheable=true`?
-- [ ] Are nested loops over collections replaced with `Map` lookups to save CPU time?
-- [ ] Do updates to the triggering record use a before-save flow or a before trigger rather than an after-save update?
-
-### 🟢 Nice to have (suggestion)
-
-- [ ] Has the bundle size been analyzed?
-- [ ] Is a CDN used?
-- [ ] Is there performance monitoring?
-- [ ] Have performance benchmarks been run?
-
----
-
-## Performance Metric Thresholds
-
-### Frontend metrics
-
-| Metric | Good | Needs improvement | Poor |
-|------|-----|--------|-----|
-| LCP | ≤ 2.5s | 2.5-4s | > 4s |
-| INP | ≤ 200ms | 200-500ms | > 500ms |
-| CLS | ≤ 0.1 | 0.1-0.25 | > 0.25 |
-| FCP | ≤ 1.8s | 1.8-3s | > 3s |
-| Bundle Size (JS) | < 200KB | 200-500KB | > 500KB |
-
-### Backend metrics
-
-| Metric | Good | Needs improvement | Poor |
-|------|-----|--------|-----|
-| API response time | < 100ms | 100-500ms | > 500ms |
-| Database query | < 50ms | 50-200ms | > 200ms |
-| Page load | < 3s | 3-5s | > 5s |
-
----
-
-## Recommended Tools
-
-### Frontend performance
-
-| Tool | Purpose |
-|------|------|
-| [Lighthouse](https://developer.chrome.com/docs/lighthouse/) | Core Web Vitals testing |
-| [WebPageTest](https://www.webpagetest.org/) | Detailed performance analysis |
-| [webpack-bundle-analyzer](https://github.com/webpack-contrib/webpack-bundle-analyzer) | Bundle analysis |
-| [Chrome DevTools Performance](https://developer.chrome.com/docs/devtools/performance/) | Runtime performance profiling |
-
-### Memory leak detection
-
-| Tool | Purpose |
-|------|------|
-| [MemLab](https://github.com/facebookincubator/memlab) | Automated memory-leak detection |
-| Chrome Memory Tab | Heap snapshot analysis |
-
-### Backend performance
-
-| Tool | Purpose |
-|------|------|
-| EXPLAIN | Database query plan analysis |
-| [pganalyze](https://pganalyze.com/) | PostgreSQL performance monitoring |
-| [New Relic](https://newrelic.com/) / [Datadog](https://www.datadoghq.com/) | APM monitoring |
-
-### Salesforce
-
-| Tool | Purpose |
-|------|------|
-| [Salesforce Code Analyzer](https://developer.salesforce.com/docs/platform/salesforce-code-analyzer/guide/code-analyzer.html) | Local static analysis; PMD `OperationWithLimitsInLoop` and `OperationWithHighCostInLoop` flag limit-consuming and expensive calls inside loops |
-| Query Plan tool, debug logs | Query selectivity and limit usage per transaction; they need an org, so ask the author or CI for the output |
-
----
-
-## Low-Level Efficiency Anti-Patterns
-
-Code-level efficiency mistakes, separate from architecture-level performance problems. This section complements the resource-management and concurrency defects already covered in [common-bugs-checklist.md](common-bugs-checklist.md).
-
-### Unnecessary repeated work
-
-- [ ] Is the same function / query called more than once in the same request/render?
-- [ ] Is a file / config read again on every loop iteration (loop-invariant work)?
-- [ ] Can a computed result be cached or passed downstream?
-
-```typescript
-// ❌ Loop-invariant work repeated on every iteration
-for (const path of paths) {
-  const config = JSON.parse(fs.readFileSync("config.json", "utf-8"));
-  processFile(path, config);
-}
-
-// ✅ Hoist it out of the loop
-const config = JSON.parse(fs.readFileSync("config.json", "utf-8"));
-for (const path of paths) processFile(path, config);
-```
-
-### Missed concurrency opportunities
-
-- [ ] Are independent async operations awaited one after another?
-- [ ] Could they run concurrently with `Promise.all` / `asyncio.gather` / `asyncio.TaskGroup`?
-
-```typescript
-// ❌ Sequential awaits
-const a = await fetchA();
-const b = await fetchB();
-
-// ✅ Concurrent
-const [a, b] = await Promise.all([fetchA(), fetchB()]);
-```
-
-> 📖 Python version with cancellation on failure: [asyncio + TaskGroup](cross-cutting/async-concurrency-patterns.md#python-asyncio--taskgroup).
-
-### Hot-path bloat
-
-- [ ] Does module-level / import-time code do heavy work (file I/O, network, building large objects)?
-- [ ] Is there initialization on the per-request path that could be deferred?
-- [ ] Does startup code block the first request?
-
-### Unbounded data structures
-
-> For resource-lifecycle defects (unclosed connections, listeners never removed, timers never cleared), see [common-bugs-checklist.md → Resource Management](common-bugs-checklist.md#resource-management). This section focuses on *capacity limits*.
-
-- [ ] Do global dicts / lists / caches have a `max-size` or TTL?
-- [ ] Do accumulating structures (queues, logs, metrics buffers) have an upper bound?
-- [ ] Are per-request objects kept alive by long-lived references, so they cannot be garbage-collected?
-
-```python
-# ❌ Unbounded cache
-_cache: dict[str, Any] = {}
-
-# ✅ Bounded LRU
-from functools import lru_cache
-
-@lru_cache(maxsize=256)
-def get_cached(key: str) -> Any:
-    return expensive_computation(key)
-```
-
----
-
 ## References
 
-- [Core Web Vitals - web.dev](https://web.dev/articles/vitals)
-- [Optimizing Core Web Vitals - Vercel](https://vercel.com/guides/optimizing-core-web-vitals-in-2024)
-- [MemLab - Meta Engineering](https://engineering.fb.com/2022/09/12/open-source/memlab/)
-- [Big O Cheat Sheet](https://www.bigocheatsheet.com/)
-- [N+1 Query Problem - Stack Overflow](https://stackoverflow.com/questions/97197/what-is-the-n1-selects-problem-in-orm-object-relational-mapping)
-- [API Performance Optimization](https://algorithmsin60days.com/blog/optimizing-api-performance/)
-- [Execution Governors and Limits (Salesforce Developers)](https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_gov_limits.htm)
+- [Core Web Vitals (web.dev)](https://web.dev/articles/vitals)
+- [Optimize Cumulative Layout Shift (web.dev)](https://web.dev/articles/optimize-cls)
 - [SOQL query selectivity (Salesforce Help)](https://help.salesforce.com/s/articleView?id=000385218&language=en_US&type=1)
-- [Flow bulkification in transactions (Salesforce Help)](https://help.salesforce.com/s/articleView?id=platform.flow_concepts_bulkification.htm&language=en_US&type=5)
-- [LWC data guidelines (Salesforce Developers)](https://developer.salesforce.com/docs/platform/lwc/guide/data-guidelines)

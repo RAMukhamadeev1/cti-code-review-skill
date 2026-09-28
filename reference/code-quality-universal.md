@@ -1,482 +1,155 @@
 # Universal Code Quality Anti-Patterns
 
-> A language-agnostic guide to code-quality anti-patterns, covering core topics such as code reuse, leaky abstractions, parameter sprawl, nested conditionals, stringly-typed code, TOCTOU, and no-op updates. It applies to PR reviews in every language; [Salesforce Mapping](#salesforce-mapping) shows the Salesforce form of each anti-pattern.
+> Language-agnostic design smells worth a review comment, each with the exceptions that make it a false positive. Flag only what the diff introduces or makes worse; anything the repo's linter, formatter, or type checker enforces is not a finding. Default tier: 🟢 or 💡, raised to 🟡 or 🔴 only where a section says so.
+> Related: [Salesforce Mapping](#salesforce-mapping) shows each pattern in Apex, LWC, and Flow.
 
-## Table of Contents
+## Review Checklist
 
-- [Code Reuse Review](#code-reuse-review)
-- [Parameter Sprawl](#parameter-sprawl)
-- [Leaky Abstractions](#leaky-abstractions)
-- [Stringly-Typed Code](#stringly-typed-code)
-- [Nested Conditionals](#nested-conditionals)
-- [Copy-Paste Variants](#copy-paste-variants)
-- [No-Op Updates](#no-op-updates)
-- [TOCTOU Race Conditions](#toctou-race-conditions)
-- [Overly Broad Operations](#overly-broad-operations)
-- [Redundant State](#redundant-state)
-- [Salesforce Mapping](#salesforce-mapping)
-- [Universal Quality Checklist](#universal-quality-checklist)
+Read this checklist first; open a section only when the diff contains its pattern.
+
+### Reuse → [Code Reuse Review](#code-reuse-review)
+
+- [ ] A new helper, hook, query, or utility doesn't duplicate one the repo already has.
+- [ ] Not a finding: a local helper when the existing one has different semantics or would add a dependency.
+
+### Signatures → [Parameter Sprawl](#parameter-sprawl)
+
+- [ ] The diff doesn't grow a long positional signature with one more parameter or a boolean mode flag; an options object, dataclass, or keyword-only arguments fit better (🟢 or 💡).
+- [ ] Not a finding: a parameter count on its own, or a signature fixed by a framework or an interface.
+
+### Boundaries → [Leaky Abstractions](#leaky-abstractions)
+
+- [ ] Raw external shapes (HTTP response bodies, another service's payload, file formats) are mapped at the edge instead of travelling into domain or UI code.
+- [ ] Not a finding: returning ORM entities from a repository or service, the norm in Django, SQLAlchemy, and Rails code, unless the repo already maps to DTOs at that layer.
+
+### Types and strings → [Stringly-Typed Code](#stringly-typed-code)
+
+- [ ] New status, role, and event-name literals use the enum, union type, or constant that already exists for them.
+
+### Control flow → [Nested Conditionals](#nested-conditionals)
+
+- [ ] Nesting or chained ternaries that the diff adds can be flattened with guard clauses, early returns, or a lookup keyed by an enum. Readability is the test; depth numbers and lint rules (`no-nested-ternary`, `max-depth`) are not findings.
+
+### Duplication → [Copy-Paste Variants](#copy-paste-variants)
+
+- [ ] The diff doesn't add a third near-copy of a non-trivial block, or a second copy of logic that must stay in sync (validation, pricing, permissions); that second case is 🟡.
+- [ ] Not a finding: two short, similar functions.
+
+### Writes and state → [No-Op Updates](#no-op-updates) · [Redundant State](#redundant-state)
+
+- [ ] Writes that trigger side effects (Salesforce DML, webhooks, cache invalidation, state setters that re-render) skip unchanged values.
+- [ ] Commits happen once per unit of work, not once per row.
+- [ ] A new stored field that can be derived has a reason (query speed, history) and is updated on every write path.
+
+### Races → [TOCTOU Race Conditions](#toctou-race-conditions)
+
+- [ ] Check-then-act on shared state (files, rows, balances, "claim" flags) is atomic: an exclusive-create flag, a conditional `UPDATE`, a unique constraint, or a row lock. An in-process lock doesn't protect state shared by several processes. 🟡, or 🔴 when the race can lose money or data.
+- [ ] Not a finding: an existence check whose race is harmless because the later operation fails cleanly and is handled.
+
+### Data volume → [Overly Broad Operations](#overly-broad-operations)
+
+- [ ] Filtering, lookups, and limits happen in the query or API call, not after loading everything into memory.
+
+### Salesforce → [Salesforce Mapping](#salesforce-mapping)
+
+- [ ] Each pattern above is also checked in its Salesforce form.
 
 ---
 
 ## Code Reuse Review
 
-Before accepting new code, search the existing codebase for reusable utilities.
-
-### Search for existing utilities
-
-```python
-# ❌ Newly written path-joining logic - the project already has PathBuilder
-def get_config_path(name):
-    base = os.environ.get("APP_ROOT", ".")
-    return os.path.join(base, "config", name + ".json")
-
-# ✅ Use the existing PathBuilder
-def get_config_path(name):
-    return PathBuilder.config(f"{name}.json")
-```
-
-```javascript
-// ❌ Hand-written debounce - the project already has lodash or utils/debounce.ts
-function debounce(fn, ms) {
-  let timer;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), ms);
-  };
-}
-
-// ✅ Use the existing utility
-import { debounce } from "@/utils/debounce";
-```
-
-**Review points:**
-- Does a new function duplicate the name or the functionality of an existing utility?
-- Can inline logic be replaced with a call to an existing module?
-- Check adjacent files and the shared/utils directories
-
----
+Before accepting a new helper, search for an existing one with the Grep tool: the new function's name and its core call (for example `setTimeout\(` for a hand-written debounce, `os\.path\.join\(` for a path builder) in `utils/`, `shared/`, `lib/`, `common/`, and the files next to the change. Name the existing helper's path in the finding. Prefer the repo's own helper to a new dependency, and a well-known library the repo already uses to a hand-written copy.
 
 ## Parameter Sprawl
 
-### Function parameters keep growing
-
-```python
-# ❌ One more parameter for every new requirement
-def create_user(name, email, role, team, active, avatar_url, timezone):
-    ...
-
-# ✅ Use a parameter object / dataclass
-@dataclass
-class CreateUserParams:
-    name: str
-    email: str
-    role: Role = Role.MEMBER
-    team: str | None = None
-    active: bool = True
-    avatar_url: str | None = None
-    timezone: str = "UTC"
-
-def create_user(params: CreateUserParams) -> User:
-    ...
-```
-
-```typescript
-// ❌ 6+ positional parameters
-function renderWidget(
-  title: string, width: number, height: number,
-  theme: string, collapsible: boolean, icon: string
-) { ... }
-
-// ✅ Options object pattern
-interface WidgetOptions {
-  title: string;
-  width?: number;
-  height?: number;
-  theme?: "light" | "dark";
-  collapsible?: boolean;
-  icon?: string;
-}
-function renderWidget(options: WidgetOptions) { ... }
-```
-
-**Review points:**
-- Does the function take ≥ 4 parameters? Consider an options object / dataclass
-- Is the new parameter just a boolean flag? Consider an enum or the strategy pattern
-- Are there mutually exclusive parameters such as `enable_x` and `disable_y`?
-
----
+Suggest one request or options object when the diff grows a signature: a TypeScript interface, a Python dataclass or keyword-only arguments, an Apex request class with `@AuraEnabled` or `@InvocableVariable` fields. A boolean that switches behavior (`render(data, true)`) reads better as two functions or an enum. There is no count threshold, and a long signature the diff only calls is not a finding.
 
 ## Leaky Abstractions
 
-### Exposing internal implementation details
-
-```python
-# ❌ Returns internal ORM objects - callers are forced to know SQLAlchemy
-def get_users():
-    return session.query(User).filter(User.active == True).all()
-
-# ✅ Return domain objects and hide the persistence layer
-def get_active_users() -> list[UserDTO]:
-    rows = user_repo.find_active()
-    return [UserDTO.from_row(r) for r in rows]
-```
-
-```typescript
-// ❌ The render function receives the raw API response structure
-renderUserCard(apiResponse.data.results[0]);
-
-// ✅ The render function receives a domain type; an adapter handles the mapping
-interface UserSummary {
-  displayName: string;
-  avatarUrl: string;
-}
-function renderUserCard(user: UserSummary): void { /* ... */ }
-renderUserCard(adaptUser(apiResponse));
-```
-
-**Review points:**
-- Does the function's return type leak the underlying implementation (ORM, HTTP client, file format)?
-- Does a component/function depend on an external system's data structures?
-- Does the change break an existing abstraction boundary?
-
----
+A leak forces callers to know an implementation detail: a component that indexes `apiResponse.data.results[0]`, a domain function that returns an HTTP client's response, a module that exposes its cache's internal map. Map external shapes once, at the edge. Where services return ORM entities everywhere, one more is consistent, not leaky.
 
 ## Stringly-Typed Code
 
-### Raw strings instead of constants/enums
-
-```python
-# ❌ Magic strings scattered everywhere
-if status == "active":
-    ...
-if role == "admin":
-    ...
-
-# ✅ Use an enum
-class Status(StrEnum):
-    ACTIVE = "active"
-    SUSPENDED = "suspended"
-    ARCHIVED = "archived"
-
-if user.status == Status.ACTIVE:
-    ...
-```
-
-```typescript
-// ❌ Raw string event names - a typo raises no error
-emitter.emit("userCreated", data);
-emitter.on("usercreated", handler); // bug: typo
-
-// ✅ Constants or a branded type
-const Events = {
-  USER_CREATED: "userCreated",
-  USER_SUSPENDED: "userSuspended",
-} as const;
-emitter.emit(Events.USER_CREATED, data);
-```
-
-**Review points:**
-- Is a raw string used where an enum/union type already exists?
-- Are event names, action types, and status values scattered across several files?
-- Are string comparisons case-sensitive without the input being validated?
-
----
+A typo in a raw string (`emitter.on("usercreated", ...)` for `"userCreated"`) fails silently at run time. Where no enum, union type, or constant exists yet, suggest one only when the diff spreads the same literal across several files. Keys built by concatenation (`` `${a}-${b}` ``) are the same smell and lose exhaustiveness checking.
 
 ## Nested Conditionals
 
-### Ternary chains and nested if/else
-
-```python
-# ❌ Ternary chains are hard to read
-label = (
-    "Admin" if role == "admin" else
-    "Manager" if role == "manager" else
-    "Viewer" if role == "viewer" else
-    "Unknown"
-)
-
-# ✅ Lookup table or match
-ROLE_LABELS = {
-    "admin": "Admin",
-    "manager": "Manager",
-    "viewer": "Viewer",
-}
-label = ROLE_LABELS.get(role, "Unknown")
-```
-
-```typescript
-// ❌ Nested ternary
-const bg = isHovered
-  ? isSelected ? "blue" : "gray"
-  : isSelected ? "navy" : "white";
-
-// ✅ Lookup table (lookup map)
-const bgMap: Record<string, string> = {
-  "true-true": "blue",
-  "true-false": "gray",
-  "false-true": "navy",
-  "false-false": "white",
-};
-const bg = bgMap[`${isHovered}-${isSelected}`];
-```
-
-```python
-# ❌ if statements nested 3+ levels deep
-def process(order):
-    if order is not None:
-        if order.items:
-            for item in order.items:
-                if item.price > 0:
-                    ...
-
-# ✅ Early return + guard clauses
-def process(order):
-    if not order or not order.items:
-        return
-    for item in order.items:
-        if item.price <= 0:
-            continue
-        ...
-```
-
-**Review points:**
-- Are ternaries nested 2 or more levels deep?
-- Is if/else nested 3 or more levels deep?
-- Can a lookup table, an early return, or match replace it?
-
----
+Flatten what the diff adds: guard clauses and early returns for preconditions, a lookup table or `match`/`switch` over an enum for value mapping. Two booleans selecting one of four values are often clearest as a short nested ternary or an `if` chain; replacing them with a map keyed by `` `${isHovered}-${isSelected}` `` trades readability for stringly-typed keys.
 
 ## Copy-Paste Variants
 
-### Near-duplicate code blocks
-
-```python
-# ❌ Two functions that are almost identical, except for the field names
-def format_user(user):
-    return f"{user.first_name} {user.last_name} ({user.email})"
-
-def format_employee(emp):
-    return f"{emp.first_name} {emp.last_name} ({emp.work_email})"
-
-# ✅ One shared abstraction
-def format_person(first: str, last: str, email: str) -> str:
-    return f"{first} {last} ({email})"
-```
-
-```typescript
-// ❌ Copy-pasted handler with only the URL changed
-async function deletePost(id: string) {
-  await fetch(`/api/posts/${id}`, { method: "DELETE" });
-  router.push("/posts");
-}
-async function deleteComment(id: string) {
-  await fetch(`/api/comments/${id}`, { method: "DELETE" });
-  router.push("/comments");
-}
-
-// ✅ Parameterize
-async function deleteResource(resource: string, id: string) {
-  await fetch(`/api/${resource}/${id}`, { method: "DELETE" });
-  router.push(`/${resource}`);
-}
-```
-
-**Review points:**
-- Are there ≥ 2 blocks of code that differ only in variable names/URLs/strings?
-- Can a parameterized shared function be extracted?
-- Can a template method or strategy remove the variants?
-
----
+Two short look-alike functions that may diverge are cheaper than the wrong abstraction; parameterize at the third copy, or at the second copy of logic that must change in step (validation, pricing, permission checks, error mapping).
 
 ## No-Op Updates
 
-### State updates triggered unconditionally
-
-```typescript
-// ❌ Every poll notifies the subscriber - even when the data has not changed
-function startStatusPolling(onChange: (status: Status) => void): () => void {
-  const interval = setInterval(() => {
-    fetch("/api/status").then(r => r.json()).then(onChange);
-  }, 5000);
-  return () => clearInterval(interval);
-}
-
-// ✅ Notify only when the value changes
-function startStatusPolling(onChange: (status: Status) => void): () => void {
-  let last: Status | undefined;
-  const interval = setInterval(() => {
-    fetch("/api/status")
-      .then(r => r.json())
-      .then((next: Status) => {
-        if (!isEqual(last, next)) {
-          last = next;
-          onChange(next);
-        }
-      })
-      .catch(handleError);
-  }, 5000);
-  return () => clearInterval(interval);
-}
-```
+A write with no net change still costs a round trip, and sometimes much more: Salesforce DML fires triggers, flows, and validation rules and uses limits ([Apex: Bulkification](salesforce/apex.md#bulkification)); Django `save()` rewrites every column; webhooks and state setters notify every subscriber. Compare with the current value and skip unchanged records.
 
 ```python
-# ❌ Writes to the DB on every loop iteration - even when the value has not changed
+# ❌ One commit per row: N round trips, no atomicity, and with SQLAlchemy's default
+#    expire_on_commit every later row is reloaded with its own SELECT
 for item in items:
     item.status = compute_status(item)
     session.commit()
 
-# ✅ Write only when the value changes
+# ✅ One unit of work, one commit (SQLAlchemy's flush already skips unchanged values)
 for item in items:
-    new_status = compute_status(item)
-    if item.status != new_status:
-        item.status = new_status
-        session.commit()
+    item.status = compute_status(item)
+session.commit()
 ```
-
-**Review points:**
-- Do polling / interval / event handlers update unconditionally?
-- Do wrapper functions preserve same-reference returns (hand back the previous value when nothing changed)?
-- Do DB writes check that something actually changed?
-
----
 
 ## TOCTOU Race Conditions
 
-### Time-of-Check-to-Time-of-Use
+Time-of-check-to-time-of-use: the state changes between the check and the action. Make the check part of the action.
 
 ```python
-# ❌ Check first, then act - the file may be deleted or created in between
-if os.path.exists(path):
-    with open(path) as f:
-        data = f.read()
+from sqlalchemy import update
 
-# ✅ Act directly + handle the exception
-try:
-    with open(path) as f:
-        data = f.read()
-except FileNotFoundError:
-    data = None
-```
-
-```python
-# ❌ Check the balance, then debit: two steps that are not atomic
+# ❌ Check-then-act on a shared row: two requests can both pass the check and both debit
+account = session.get(Account, account_id)
 if account.balance >= amount:
     account.balance -= amount
+    session.commit()
 
-# ✅ An atomic operation or a lock
-with account.lock:
-    if account.balance < amount:
-        raise InsufficientFundsError()
-    account.balance -= amount
+# ✅ One conditional UPDATE: the database checks and writes atomically
+result = session.execute(
+    update(Account)
+    .where(Account.id == account_id, Account.balance >= amount)
+    .values(balance=Account.balance - amount)
+)
+if result.rowcount == 0:
+    raise InsufficientFundsError(account_id)  # or the account does not exist
+session.commit()
 ```
 
 ```typescript
-// ❌ Check-then-act is unsafe in async code
-if (!fileExists(path)) {
-  await writeFile(path, content);
+import { writeFile } from 'node:fs/promises';
+
+// ❌ Another process can create the file between the check and the write
+if (!existsSync(path)) {
+    await writeFile(path, content);
 }
 
-// ✅ Act directly + catch
-try {
-  await writeFile(path, content, { flag: "wx" });
-} catch (e) {
-  if (e.code === "EEXIST") { /* handle */ }
-  else throw e;
+// ✅ Exclusive create: the OS refuses the write when the file already exists
+async function writeOnce(path: string, content: string): Promise<boolean> {
+    try {
+        await writeFile(path, content, { flag: 'wx' });
+        return true;
+    } catch (err: unknown) {
+        if (err instanceof Error && 'code' in err && err.code === 'EEXIST') return false;
+        throw err;
+    }
 }
 ```
 
-**Review points:**
-- Can an `if exists → operate` pattern be replaced with `try operate → catch`?
-- Are multi-step state changes inside a transaction/lock?
-- In async code, is there an await between the check and the act?
-
----
+An in-process lock (`threading.Lock`, a JavaScript mutex) serializes one process only; web apps with several workers or instances need the database or the filesystem to arbitrate. An existence check before `open()` is only worth a comment when the race changes behavior; otherwise open the file and handle `FileNotFoundError`.
 
 ## Overly Broad Operations
 
-### Reading too much data
-
-```python
-# ❌ Read the entire file to get the first line
-content = Path("log.txt").read_text()
-first_line = content.split("\n")[0]
-
-# ✅ Read only the first line, without loading the whole file
-with open("log.txt") as f:
-    first_line = f.readline()
-```
-
-```typescript
-// ❌ Load every item, then filter
-const allItems = await db.query("SELECT * FROM orders");
-const pending = allItems.filter(o => o.status === "pending");
-
-// ✅ Filter in the database
-const pending = await db.query(
-  "SELECT * FROM orders WHERE status = ?", ["pending"]
-);
-```
-
-```python
-# ❌ Load the whole table to find one record
-user = next(u for u in session.scalars(select(User)).all() if u.id == user_id)
-
-# ✅ Precise lookup by primary key
-user = session.get(User, user_id)
-```
-
-**Review points:**
-- Does the code read an entire collection/file and then use only a small part of it?
-- Can filtering be pushed down to the database/storage layer?
-- Do API calls support pagination/limit parameters?
-
----
+Push filters, lookups, and limits down to the storage layer: `session.get(User, user_id)` instead of loading every row and searching in Python, `WHERE status = ?` instead of `.filter()` after `SELECT`, `readline()` instead of reading a whole file for one line, and the API's `limit` and cursor instead of every page.
 
 ## Redundant State
 
-### State that can be derived
-
-```typescript
-// ❌ Stores fullName alongside firstName + lastName
-interface User {
-  firstName: string;
-  lastName: string;
-  fullName: string;  // redundant
-}
-
-// ✅ fullName is a derived value
-interface User {
-  firstName: string;
-  lastName: string;
-}
-const fullName = `${user.firstName} ${user.lastName}`;
-```
-
-```python
-# ❌ Cached values can go stale when the source data changes
-class Order:
-    total: float
-    item_count: int       # redundant if len(items) gives the same
-    items: list[Item]
-
-# ✅ Derive it, or use a property
-class Order:
-    items: list[Item]
-
-    @property
-    def total(self) -> float:
-        return sum(item.price for item in self.items)
-
-    @property
-    def item_count(self) -> int:
-        return len(self.items)
-```
-
-**Review points:**
-- Can any field be derived from other fields?
-- Do cached values have an invalidation mechanism?
-- Can an observer/effect be replaced with a direct call?
+A stored copy of derivable data (`fullName` beside `firstName` and `lastName`, `item_count` beside `items`) goes stale unless every write path updates it. Prefer a computed property; a stored copy that serves queries or history is fine when the diff updates it everywhere. Sum money as `Decimal` or integer minor units, never binary floats.
 
 ---
 
@@ -494,19 +167,3 @@ The same anti-patterns in Salesforce code and metadata. The linked guides hold t
 | TOCTOU race conditions | Query-then-update without `FOR UPDATE`, so two concurrent transactions (for example, two Queueable jobs) overwrite each other's changes | [Apex: Async Apex](salesforce/apex.md#async-apex) |
 | Overly broad operations | `FIELDS(STANDARD)` in Apex or `FIELDS(ALL)` in API queries when the code reads a few fields; queries with no selective filter on large objects; flow Get Records elements that store all fields | [SOQL & SOSL: Selectivity & Large Data Volumes](salesforce/soql-sosl.md#selectivity--large-data-volumes) |
 | Redundant state | Trigger-maintained copies of values that a formula or roll-up summary field could derive | [Metadata: Objects & Fields](salesforce/metadata.md#objects--fields) |
-
----
-
-## Universal Quality Checklist
-
-- [ ] **Reuse review**: existing utilities/helpers were searched for; nothing is reinvented?
-- [ ] **Parameter count**: functions take ≤ 3 parameters? If more, is an options object / dataclass used?
-- [ ] **Abstraction boundaries**: return types do not expose internal implementation details (ORM, HTTP client, file format)?
-- [ ] **Type safety**: no magic strings in place of an existing enum/constant/union type?
-- [ ] **Condition depth**: ternaries nested ≤ 1 level? if/else nested ≤ 2 levels?
-- [ ] **DRY**: no copy-paste-with-variation (≥ 2 near-identical blocks)?
-- [ ] **No-op guards**: polling / interval / event handlers have a change-detection guard?
-- [ ] **TOCTOU**: `if exists → operate` replaced with `try operate → catch`?
-- [ ] **Data precision**: no reading an entire collection/file just to use a subset?
-- [ ] **Redundant state**: no stored fields that can be derived from other fields?
-- [ ] **Salesforce**: each anti-pattern above also checked in its Salesforce form ([Salesforce Mapping](#salesforce-mapping))?

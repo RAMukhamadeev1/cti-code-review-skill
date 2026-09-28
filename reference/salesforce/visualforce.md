@@ -1,62 +1,57 @@
 # Visualforce Code Review Guide
 
-Review guidance for Visualforce pages and components (`.page`, `.component`), their custom controllers and extensions, and JavaScript remoting: output encoding, CSRF, controller security, view state, remoting, static resources, Lightning Experience, and controller tests.
+Review rules for Visualforce pages, components, and email templates (`.page`, `.component`, `<messaging:emailTemplate>`), their custom controllers and extensions, and JavaScript remoting. Read two versions before judging behavior. The page's `.page-meta.xml` `<apiVersion>` sets Visualforce behavior. The controller's `.cls-meta.xml` sets its Apex defaults, including user mode and implicit `with sharing` at API 67.0+ ([Security Model](platform.md#security-model)). A diff that bumps only one of them changes only that side.
 
-> Load the [Salesforce Platform Guide](platform.md) first — it defines governor limits, the security model and API-version rules, and severity calibration.
-> Related: [Apex](apex.md) · [SOQL injection](soql-sosl.md#soql-injection) · [XSS Prevention](../cross-cutting/xss-prevention.md#salesforce-lwc-aura-visualforce)
+> Load [platform.md](platform.md) first. Related: [Apex](apex.md) · [SOQL Injection](soql-sosl.md#soql-injection) · [LWC](lwc.md) for pages being replaced
 
-## Table of Contents
+## Review Checklist
 
-- [When to Use This Guide](#when-to-use-this-guide)
-- [Visualforce Today](#visualforce-today)
-- [Output Encoding](#output-encoding)
-- [CSRF & State Changes](#csrf--state-changes)
-- [Controller Security](#controller-security)
-- [View State & Performance](#view-state--performance)
-- [JavaScript Remoting & Remote Objects](#javascript-remoting--remote-objects)
-- [Static Resources & Lightning Experience](#static-resources--lightning-experience)
-- [Testing Controllers](#testing-controllers)
-- [Review Checklist](#review-checklist)
-- [References](#references)
+Read this checklist first; open a section only when the diff contains its pattern.
+Pre-existing code is a finding only when the change makes it worse. Take default tiers from the [severity table](platform.md#severity-calibration) (the XSS escape hatch, DML on page load, and entry-point access rows).
 
----
+### Encoding → [Output Encoding](#output-encoding)
 
-## When to Use This Guide
+- [ ] No `escape="false"` or `itemEscaped="false"` around data the page doesn't control; values inside such markup use `HTMLENCODE`
+- [ ] Merge fields in `<script>` strings and `on*` handlers use `JSENCODE`; values written to `innerHTML` use `JSENCODE(HTMLENCODE())`
+- [ ] The page fixes each URL's scheme and host and `URLENCODE`s parameters; no merge fields in `<style>` or `style` attributes
+- [ ] Page parameters stay data in Apex; no `addError(message, false)` with user input
 
-| Code under review | Load |
-|---|---|
-| `pages/*.page`, `components/*.component`, Visualforce email templates (`<messaging:emailTemplate>`) | This guide |
-| Custom controllers and extensions (`ApexPages.StandardController` constructors, `PageReference`, `@RemoteAction`) | This guide + [apex.md](apex.md) |
-| Queries built from page parameters | [SOQL Injection](soql-sosl.md#soql-injection) |
-| A page being replaced by a Lightning web component | [lwc.md](lwc.md) |
+### CSRF → [CSRF & State Changes](#csrf--state-changes)
 
-Read two versions before judging behavior: the page's `.page-meta.xml` `<apiVersion>` sets Visualforce behavior, and the controller's `.cls-meta.xml` sets its Apex defaults, including user mode and implicit `with sharing` at API 67.0+ ([Security Model](platform.md#security-model)). A diff that bumps only one of them changes only that side.
+- [ ] No DML runs on GET (constructors, getters, initializer blocks, or a method wired to `<apex:page action>`) unless the page sets `confirmationTokenRequired`
+- [ ] State changes happen only in form POSTs the user starts; nothing auto-submits on load
 
----
+### Controller security → [Controller Security](#controller-security)
 
-## Visualforce Today
+- [ ] Below API 67.0, every controller and extension declares its sharing and queries in user mode; at 67.0+ the defaults cover a missing keyword
+- [ ] Extensions don't copy protected fields into String or wrapper properties
+- [ ] URL Ids are parsed, type-checked, bound, and looked up in user mode; redirects stay local
 
-### Build new UI in LWC; keep Visualforce where it still fits
+### View state & performance → [View State & Performance](#view-state--performance)
 
-Salesforce recommends Lightning Web Components over Visualforce for custom functionality. Visualforce still fits print-ready PDFs (`renderAs="pdf"`), Visualforce email templates, and existing pages and overrides under maintenance; a new Visualforce page for general UI is a 🟡 finding unless the PR says why LWC doesn't fit. PDF rendering runs no JavaScript, supports no web fonts, and needs a response under 15 MB.
+- [ ] Rebuildable fields are `transient` and the page has one `<apex:form>`; for large pages, ask the author for the view-state size (limit 170 KB)
+- [ ] Large lists page through `StandardSetController` over a query bounded to 10,000 rows; getters query at most once per request
+- [ ] Large read-only pages use `readOnly="true"`; pollers are slow, light, and switched off when done
 
-```html
-<!-- ❌ New interactive UI as a Visualforce page with hand-rolled rendering over remoting -->
-<apex:page controller="InvoiceBoardController" lightningStylesheets="true"><div id="board"></div><script>/* ... */</script></apex:page>
+### Remoting → [JavaScript Remoting & Remote Objects](#javascript-remoting--remote-objects)
 
-<!-- ✅ Visualforce where it fits: a print-ready PDF from the standard controller -->
-<apex:page standardController="Invoice__c" renderAs="pdf">
-    <h1>Invoice {!Invoice__c.Name}</h1><apex:outputField value="{!Invoice__c.Total__c}"/>
-</apex:page>
-```
+- [ ] Every `@RemoteAction` class declares sharing, validates arguments, queries in user mode, and returns only the fields the page shows
+- [ ] Remoting keeps `escape: true` or writes raw values only as text; Remote Objects list only the fields the page needs
+
+### Pages, resources & Lightning → [Static Resources & Lightning Experience](#static-resources--lightning-experience)
+
+- [ ] A new page for general UI documents why LWC doesn't fit (without that, 🟡 [important]); PDFs, email templates, and maintained overrides are fine
+- [ ] Libraries come from versioned static resources; in Lightning Experience, navigation uses `sforce.one` or `URLFOR($Action...)`, not hand-built URLs
+
+### Tests → [Testing Controllers](#testing-controllers)
+
+- [ ] Controller tests set the page and its parameters, run as a least-privilege user, assert navigation, messages, and data, and cover hostile input (foreign Ids, hidden records, an external `retURL`, markup)
 
 ---
 
 ## Output Encoding
 
-Every merge field is HTML-encoded automatically unless it sits inside `<script>` or `<style>` or in a component with `escape="false"`. That encoding runs last, covers `<`, `>`, and quotes, and makes HTML text and quoted attributes safe, nothing else: wherever a value passes through JavaScript, a URL, or CSS, the page encodes for that context itself.
-
-> 📖 Cross-language background: [XSS Prevention](../cross-cutting/xss-prevention.md#salesforce-lwc-aura-visualforce).
+Every merge field is HTML-encoded automatically unless it sits inside `<script>` or `<style>`, or in a component with `escape="false"`. That encoding runs last, covers `<`, `>`, and quotes, and makes HTML text and quoted attributes safe, nothing else. Wherever a value passes through JavaScript, a URL, or CSS, the page encodes for that context itself ([XSS Prevention](../cross-cutting/xss-prevention.md#salesforce-lwc-aura-visualforce)).
 
 ### Encode for the context the value lands in
 
@@ -72,7 +67,7 @@ Each parser a value passes through needs its own layer of encoding, applied inne
 | A URL parameter | `URLENCODE`, with the scheme, host, and path fixed by the page |
 | `<style>` or a `style` attribute | Nothing is enough: allowlist the value in the controller |
 
-`JSINHTMLENCODE` predates automatic encoding: in an event handler it double-encodes (safe, but users see entities), and in a script it is shorthand for `JSENCODE(HTMLENCODE())`. Encoding can't make a CSS value safe, so keep merge fields out of `<style>` and `style` attributes.
+`JSINHTMLENCODE` predates automatic encoding. In an event handler it double-encodes (safe, but users see entities), and in a script it is shorthand for `JSENCODE(HTMLENCODE())`. Encoding can't make a CSS value safe, so keep merge fields out of `<style>` and `style` attributes.
 
 ```html
 <!-- ❌ Quote breaks out of the string; handler decodes then runs; innerHTML parses markup; caller picks the URL and the CSS -->
@@ -90,23 +85,24 @@ Each parser a value passes through needs its own layer of encoding, applied inne
 <div class="{!bannerClass}">...</div> <!-- bannerClass returns 'banner_info' or 'banner_warning', never raw input -->
 ```
 
-Static analysis: PMD `VfUnescapeEl`, `VfHtmlStyleTagXss` (it accepts `HTMLENCODE` or `URLENCODE` in `<style>`, which satisfies the rule but not the attack).
+Static analysis: PMD `VfUnescapeEl` and `VfHtmlStyleTagXss`. The second accepts `HTMLENCODE` or `URLENCODE` in `<style>`, which satisfies the rule but not the attack.
 
 ### Never combine escape="false" with data the page doesn't control
 
-`escape="false"` on `apex:outputText`, `apex:outputLabel`, `apex:pageMessage`, `apex:pageMessages`, or `apex:sectionHeader`, and `itemEscaped="false"` on `apex:selectOption`, switch encoding off for everything inside. When markup must wrap data, encode each value with `HTMLENCODE`; `apex:outputField` renders rich text fields. The Apex twin is `record.addError(message, false)`, which unescapes an error shown on the page.
+`escape="false"` on `apex:outputText`, `apex:outputLabel`, `apex:pageMessage`, or `apex:pageMessages`, and `itemEscaped="false"` on `apex:selectOption`, switch encoding off for everything inside. Put markup outside the component and let the platform encode the data. Visualforce markup is XML, so a literal `<` inside an attribute value doesn't compile. When `escape="false"` is truly needed, write the markup as entities and `HTMLENCODE` each value. `apex:outputField` renders rich text fields. The Apex twin is `record.addError(message, false)`, which unescapes an error shown on the page.
 
 ```html
 <!-- ❌ User data rendered as markup -->
 <apex:outputText value="{!comment.Body__c}" escape="false"/>
 <apex:pageMessages escape="false"/> <!-- messages built from user input -->
 
-<!-- ✅ Markup from the page, data encoded; rich text through outputField -->
-<apex:outputText escape="false" value="<b>{!HTMLENCODE(Account.Name)}</b> updated this record"/>
+<!-- ✅ Markup from the page, data encoded by the platform; rich text through outputField -->
+<b><apex:outputText value="{!Account.Name}"/></b> updated this record
+<apex:outputText escape="false" value="&lt;b&gt;{!HTMLENCODE(Account.Name)}&lt;/b&gt; updated this record"/>
 <apex:outputField value="{!Account.Rich_Notes__c}"/>
 ```
 
-Static analysis: PMD `VfUnescapeEl`, `ApexXSSFromEscapeFalse` (the `addError` form).
+Static analysis: PMD `VfUnescapeEl`, and `ApexXSSFromEscapeFalse` for the `addError` form.
 
 ### Treat page parameters as untrusted in Apex too
 
@@ -129,13 +125,11 @@ Static analysis: PMD `ApexXSSFromURLParam`.
 
 ## CSRF & State Changes
 
-Visualforce puts an anti-CSRF token in every `<apex:form>` and checks it on the POST; nothing checks GET requests. A state change that runs on page load or from URL parameters can be triggered by a link or an image tag on another site.
-
-> 📖 Cross-language background: [CSRF Prevention](../security-review-guide.md#csrf-prevention).
+Visualforce puts an anti-CSRF token in every `<apex:form>` and checks it on the POST; nothing checks GET requests. A state change that runs on page load or from URL parameters can be triggered by a link or an image tag on another site ([CSRF Prevention](../security-review-guide.md#csrf-prevention)).
 
 ### Keep DML out of page load
 
-`<apex:page action="...">` runs on the GET that loads the page, and Visualforce doesn't allow DML in getters or controller constructors, so writes on load usually hide in an `init()` wired to `action=`. Load, validate, and display on GET; change data only in an action method that a form calls (`apex:commandButton`, `apex:commandLink`, `apex:actionFunction`).
+`<apex:page action="...">` runs on the GET that loads the page, and Visualforce doesn't allow DML in getters or controller constructors, so writes on load usually hide in an `init()` wired to `action=`. Load, validate, and display on GET; change data only in an action method that a form calls (`apex:commandButton`, `apex:commandLink`, `apex:actionFunction`). Severity is in the DML-on-page-load row of the [severity table](platform.md#severity-calibration). Judge a method by how the page invokes it, not by its name: an `init()` called from a command button is fine. A page that sets `confirmationTokenRequired` requires a CSRF token on GET ([below](#never-change-state-from-get-parameters-or-on-load)), so DML on load is protected there.
 
 ```apex
 // ❌ <apex:page standardController="Invoice__c" extensions="InvoiceVoidExtension" action="{!init}"/>
@@ -158,11 +152,11 @@ public with sharing class InvoiceVoidExtension {
 }
 ```
 
-Static analysis: PMD `VfCsrf` (page `action`), `ApexCSRF` (DML in constructors, initializer blocks, and methods named `init`).
+Static analysis: PMD `VfCsrf` flags a page `action`. PMD `ApexCSRF` flags DML in constructors, initializer blocks, and every method named `init`, so confirm how each hit is invoked.
 
 ### Never change state from GET parameters or on load
 
-A URL such as `/apex/ApproveInvoice?id=...&approve=1` must not approve anything, and scripts must not submit a form or call an `apex:actionFunction` on load: the POST then carries a valid token, but the user never chose it. When a page opened from a custom button must act at once, show an intermediate confirmation page. A page that overrides the standard Delete button can require a token on GET: Require CSRF protection on GET requests, `<confirmationTokenRequired>true</confirmationTokenRequired>` in `.page-meta.xml`.
+A URL such as `/apex/ApproveInvoice?id=...&approve=1` must not approve anything. Scripts must not submit a form or call an `apex:actionFunction` on load: the POST then carries a valid token, but the user never chose it. When a page opened from a custom button must act at once, show an intermediate confirmation page. A page that overrides the standard Delete button can require a token on GET: set Require CSRF protection on GET requests, which is `<confirmationTokenRequired>true</confirmationTokenRequired>` in `.page-meta.xml`.
 
 ```html
 <!-- ❌ Auto-submits on load: every visit, including one forced by another site, approves -->
@@ -177,11 +171,11 @@ A URL such as `/apex/ApproveInvoice?id=...&approve=1` must not approve anything,
 
 ## Controller Security
 
-Standard controllers enforce the user's object permissions, FLS, and sharing. Custom controllers, extensions, and `@RemoteAction` methods are ordinary Apex that follows its class's `<apiVersion>`: below API 67.0 they run in system mode with sharing set by the keyword, at 67.0+ in user mode and `with sharing` when undeclared ([Security Model](platform.md#security-model)). Every URL parameter is attacker-controlled.
+Standard controllers enforce the user's object permissions, FLS, and sharing. Custom controllers, extensions, and `@RemoteAction` methods are ordinary Apex that follows its class's `<apiVersion>`. Below API 67.0 they run in system mode, with sharing set by the keyword; at 67.0+ they run in user mode, and `with sharing` when undeclared ([Security Model](platform.md#security-model)). Every URL parameter is attacker-controlled.
 
 ### Declare with sharing and query in user mode in every controller and extension
 
-A Visualforce controller is an entry point, so below API 67.0 a class without a keyword runs without sharing. Declare `with sharing` (`inherited sharing` for shared helpers), and query and write in user mode ([Data Access Security](apex.md#data-access-security)).
+A Visualforce controller is an entry point, so below API 67.0 a class without a keyword runs without sharing. Declare `with sharing` (`inherited sharing` for shared helpers), and query and write in user mode ([Data Access Security](apex.md#data-access-security)). At API 67.0+ the defaults cover a missing keyword; an explicit one is still preferred, per the sharing-keyword row of the [severity table](platform.md#severity-calibration).
 
 ```apex
 // ❌ API 66.0: no keyword and no access mode: every invoice and every field, whatever the user may see
@@ -203,7 +197,7 @@ Static analysis: PMD `ApexSharingViolations`, `ApexCRUDViolation`.
 
 ### Don't let extensions and controller properties bypass the standard controller's checks
 
-A standard controller checks access to the record it loads, and `apex:inputField`, `apex:outputField`, and merge fields bound to sObject fields honor FLS. An extension's own queries and DML don't inherit that, and a value copied into a controller property (a String, wrapper, or map) loses FLS because the page can't tell where it came from.
+A standard controller checks access to the record it loads, and `apex:inputField`, `apex:outputField`, and merge fields bound to sObject fields honor FLS. An extension's own queries and DML don't inherit that. A value copied into a controller property (a String, wrapper, or map) loses FLS, because the page can't tell where it came from.
 
 ```apex
 // ❌ System-mode query in the extension; the margin reaches the page through a String property
@@ -220,28 +214,24 @@ public with sharing class InvoiceExtension {
 
 ### Validate record Ids from the URL and bind every parameter
 
-An `id` parameter can name a record of another type, a record the user can't see, or garbage. Parse it (`Id.valueOf` throws `StringException` on bad input), check its sObject type, bind it, and look it up in user mode; never concatenate a parameter into a query ([SOQL Injection](soql-sosl.md#soql-injection); client-supplied Ids: [Data Access Security](apex.md#data-access-security)).
+An `id` parameter can name a record of another type, a record the user can't see, or garbage. Parse it (`Id.valueOf` throws `StringException` on bad input), check its sObject type, bind it, and look it up in user mode. Never concatenate a parameter into a query ([SOQL Injection](soql-sosl.md#soql-injection); client-supplied Ids: [Data Access Security](apex.md#data-access-security)).
 
 ```apex
 // ❌ Any object type, an unhandled exception on garbage, and a system-mode lookup
 Id invoiceId = ApexPages.currentPage().getParameters().get('id');
 Invoice__c inv = [SELECT Id, Name FROM Invoice__c WHERE Id = :invoiceId];
 
-// ✅ Typed and type-checked; then query WHERE Id = :invoiceId WITH USER_MODE into a list
-public inherited sharing class PageParams {
-    public static Id recordId(String name, Schema.SObjectType expectedType) {
-        String raw = ApexPages.currentPage().getParameters().get(name);
-        try {
-            Id value = String.isBlank(raw) ? null : Id.valueOf(raw);
-            return value?.getSObjectType() == expectedType ? value : null;
-        } catch (StringException e) { return null; } // not an Id: handled like a missing parameter
-    }
-}
+// ✅ Garbage and foreign types become null (handled like a missing parameter); the lookup binds, in user mode, into a list
+String raw = ApexPages.currentPage().getParameters().get('id');
+Id invoiceId;
+try { invoiceId = String.isBlank(raw) ? null : Id.valueOf(raw); } catch (StringException e) { invoiceId = null; }
+if (invoiceId?.getSObjectType() != Invoice__c.SObjectType) { invoiceId = null; }
+List<Invoice__c> rows = [SELECT Id, Name FROM Invoice__c WHERE Id = :invoiceId WITH USER_MODE LIMIT 1];
 ```
 
 ### Allowlist redirect targets
 
-`new PageReference(retURL)` with a caller-supplied `retURL` sends users wherever an attacker chooses, typically a copy of the login page. Accept only local paths (one leading `/`, no backslash or line break), or choose the destination in code.
+This is the open-redirect rule for all Salesforce UI code; LWC and Aura navigation link here. `new PageReference(retURL)` with a caller-supplied `retURL` sends users wherever an attacker chooses, typically a copy of the login page. Accept only local paths, or choose the destination in code. A local path starts with one `/`, contains only printable ASCII, and has no backslash. Browsers strip tabs and line breaks from URLs, so `/`, a tab, then `/evil.example` becomes `//evil.example`.
 
 ```apex
 // ❌ Open redirect
@@ -250,7 +240,8 @@ return new PageReference(ApexPages.currentPage().getParameters().get('retURL'));
 // ✅ Local paths only; anything else falls back to a page the code chose, such as stdController.view()
 public inherited sharing class SafeRedirect {
     public static PageReference toLocal(String target, PageReference fallback) {
-        Boolean isLocal = String.isNotBlank(target) && target.startsWith('/') && !target.startsWith('//') && !target.containsAny('\\\r\n');
+        Boolean isLocal = String.isNotBlank(target) && target.startsWith('/') && !target.startsWith('//')
+            && Pattern.matches('[\\x21-\\x7E]*', target) && !target.contains('\\');
         return isLocal ? new PageReference(target) : fallback;
     }
 }
@@ -266,7 +257,7 @@ Every postback carries the page's view state: the non-transient fields of the co
 
 ### Keep view state small
 
-Mark fields the next request can rebuild as `transient`, keep Ids instead of record lists, and use one `<apex:form>` per page, with `<apex:actionRegion>` to limit what a partial request processes. Static variables, `PageReference` objects, and most system objects are never saved.
+Mark fields the next request can rebuild as `transient`, and keep Ids instead of record lists. Use one `<apex:form>` per page, with `<apex:actionRegion>` to limit what a partial request processes. Static variables, `PageReference` objects, and most system objects are never saved.
 
 ```apex
 // ❌ Thousands of rows and a derived report serialized into every postback
@@ -280,19 +271,20 @@ public transient Map<Id, Decimal> totalsByAccount { get; private set; }
 
 ### Page lists with StandardSetController and keep getters idempotent
 
-`ApexPages.StandardSetController` pages a query in the database and holds one page of rows; `next()`, `previous()`, and `getHasNext()` drive navigation. It handles up to 10,000 records (`getCompleteResult()` returns false when the query matched more), and iteration components render at most 1,000 items outside read-only mode. Visualforce calls getters in no defined order and any number of times per request, so a getter must not query on every call or have side effects.
+`ApexPages.StandardSetController` pages a query in the database and holds one page of rows; `next()`, `previous()`, and `getHasNext()` drive navigation. It handles at most 10,000 records. Built from a `QueryLocator` whose query returns more, it throws a `LimitException`, which can't be caught. Built from a list, it truncates to 10,000 records, and `getCompleteResult()` then reports that the set is incomplete. So bound the locator's query with a selective filter or `LIMIT 10000`. Iteration components render at most 1,000 items outside read-only mode. Visualforce calls getters in no defined order and any number of times per request, so a getter must not query on every call or have side effects.
 
 ```apex
 // ❌ Every matching record, queried again on each evaluation, rendered in one table
 public List<Contact> getContacts() { return [SELECT Id, Name FROM Contact WHERE AccountId = :accountId WITH USER_MODE]; }
 
-// ✅ The database pages; the getter builds the controller once and returns 25 rows
+// ✅ The database pages over a bounded query; the getter builds the controller once and returns 25 rows
 public with sharing class AccountContactsController {
     public Id accountId { get; set; }
     public ApexPages.StandardSetController setCon {
         get {
             if (setCon == null) {
-                setCon = new ApexPages.StandardSetController(Database.getQueryLocator([SELECT Id, Name FROM Contact WHERE AccountId = :accountId WITH USER_MODE ORDER BY Name]));
+                setCon = new ApexPages.StandardSetController(Database.getQueryLocator(
+                    [SELECT Id, Name FROM Contact WHERE AccountId = :accountId WITH USER_MODE ORDER BY Name LIMIT 10000]));
                 setCon.setPageSize(25);
             }
             return setCon;
@@ -317,7 +309,7 @@ public with sharing class AccountContactsController {
 
 ### Poll slowly, and stop when the work is done
 
-Each `apex:actionPoller` tick is a request that runs its action and rerenders; the interval must be at least 5 seconds (default 60), and a polling page keeps the session alive indefinitely. Keep the action light (no DML or callouts), don't combine the poller with other AJAX components, and switch it off with `enabled` when nothing is left to wait for.
+Each `apex:actionPoller` tick is a request that runs its action and rerenders. The interval must be at least 5 seconds (default 60), and a polling page keeps the session alive indefinitely. Keep the action light (no DML or callouts), avoid pollers on pages with enhanced lists, and switch the poller off with `enabled` when nothing is left to wait for.
 
 ```html
 <!-- ❌ Fast, endless polling with a heavy action -->
@@ -331,7 +323,7 @@ Each `apex:actionPoller` tick is a request that runs its action and rerenders; t
 
 ## JavaScript Remoting & Remote Objects
 
-Remoting calls `@RemoteAction` methods without view state or a form post; Remote Objects give JavaScript direct create, read, update, and delete access to declared objects and fields. The server-side rules of [The LWC-Apex Contract](lwc.md#the-lwc-apex-contract) apply here too.
+Remoting calls `@RemoteAction` methods without view state or a form post. Remote Objects give JavaScript direct create, read, update, and delete access to declared objects and fields. The server-side rules of [The LWC-Apex Contract](lwc.md#the-lwc-apex-contract) apply here too.
 
 ### Treat every @RemoteAction method as a public endpoint
 
@@ -387,40 +379,29 @@ The Remote Objects controller applies sharing and FLS and always HTML-encodes re
 
 ## Static Resources & Lightning Experience
 
+### Build new UI in LWC; keep Visualforce where it still fits
+
+Salesforce recommends Lightning Web Components over Visualforce for custom functionality. A new Visualforce page for general UI is a 🟡 [important] finding unless the PR says why LWC doesn't fit. Visualforce still fits print-ready PDFs (`renderAs="pdf"`), Visualforce email templates, and existing pages and overrides under maintenance. PDF rendering runs no JavaScript, supports no web fonts, and needs a response under 15 MB.
+
 ### Load libraries from versioned static resources
 
-Serve third-party JavaScript and CSS as static resources with the version in the resource or file name, and load them with `apex:includeScript` and `apex:stylesheet`. A CDN URL runs code nobody reviewed, and an unversioned resource hides which release the page uses; the RetireJS rules flag known-vulnerable libraries in static resources ([Tooling](platform.md#tooling)).
-
-```html
-<!-- ❌ Unpinned code from a CDN, and a resource name that hides the version -->
-<script src="https://cdn.example.com/chart.js"></script>
-<apex:includeScript value="{!$Resource.chartlib}"/>
-
-<!-- ✅ Pinned libraries from static resource archives -->
-<apex:includeScript value="{!URLFOR($Resource.chartjs_4_4, 'chart.umd.min.js')}"/>
-<apex:stylesheet value="{!URLFOR($Resource.app_styles_2_1, 'app.css')}"/>
-```
+Serve third-party JavaScript and CSS as static resources with the version in the resource or file name, and load them with `apex:includeScript` and `apex:stylesheet` (`{!URLFOR($Resource.chartjs_4_4, 'chart.umd.min.js')}`). A CDN URL runs unpinned code nobody reviewed, and an unversioned resource hides which release the page uses. The rules, including the RetireJS scan, live in [Load third-party libraries from static resources](lwc.md#load-third-party-libraries-from-static-resources).
 
 ### Work with the Lightning container: navigate with sforce.one, style with lightningStylesheets
 
-In Lightning Experience and the mobile app, a Visualforce page runs in an iframe on a separate domain: its JavaScript can't reach the parent window, setting `window.location` directly bypasses the app's navigation, and hand-built URLs such as `'/' + id + '/e'` break across interfaces. Use `sforce.one` when it exists and `URLFOR($Action...)` otherwise. `lightningStylesheets="true"` gives standard components the Lightning look there and leaves Salesforce Classic unchanged; it isn't supported in Experience Cloud sites or with `renderAs="pdf"`, and a page with `applyBodyTag="false"` adds the `slds-vf-scope` class to `<body>` itself.
+In Lightning Experience and the mobile app, a Visualforce page runs in an iframe on a separate domain. Its JavaScript can't reach the parent window, setting `window.location` directly bypasses the app's navigation, and hand-built URLs such as `'/' + id + '/e'` break across interfaces. Use `sforce.one` when it exists and `URLFOR($Action...)` otherwise. `lightningStylesheets="true"` gives standard components the Lightning look there and leaves Salesforce Classic unchanged. It isn't supported in Experience Cloud sites or with `renderAs="pdf"`, and a page with `applyBodyTag="false"` adds the `slds-vf-scope` class to `<body>` itself.
 
 ```html
 <!-- ❌ Classic styling, a reach for the parent window, and a Classic URL built by hand -->
 <apex:page standardController="Account"><script>function openAccount(id) { window.top.location.href = '/' + id + '/e'; }</script></apex:page>
 
-<!-- ✅ Lightning styling; sforce.one inside Lightning Experience and the mobile app, URLFOR elsewhere -->
-<apex:page standardController="Account" lightningStylesheets="true">
-    <script>
-        function openAccount() {
-            if (typeof sforce !== 'undefined' && sforce.one) {
-                sforce.one.navigateToSObject('{!JSENCODE(Account.Id)}');
-            } else {
-                window.location.href = '{!JSENCODE(URLFOR($Action.Account.View, Account.Id))}';
-            }
-        }
-    </script>
-</apex:page>
+<!-- ✅ Lightning styling; sforce.one in Lightning Experience and the mobile app, URLFOR elsewhere -->
+<apex:page standardController="Account" lightningStylesheets="true"><script>
+    function openAccount() {
+        if (typeof sforce !== 'undefined' && sforce.one) { sforce.one.navigateToSObject('{!JSENCODE(Account.Id)}'); }
+        else { window.location.href = '{!JSENCODE(URLFOR($Action.Account.View, Account.Id))}'; }
+    }
+</script></apex:page>
 ```
 
 ---
@@ -429,60 +410,25 @@ In Lightning Experience and the mobile app, a Visualforce page runs in an iframe
 
 ### Test controllers through the page context, as a restricted user
 
-General test rules (assertions, test data, `runAs`, `startTest`) are in [Testing](apex.md#testing). Set the page with `Test.setCurrentPage`, put the URL parameters a caller would send, construct the controller the way the page does, and assert the navigation (`PageReference.getUrl()`), the messages (`ApexPages.hasMessages(ApexPages.Severity.ERROR)`), and the data. Cover hostile input: an Id of another type, a record the user can't see, a `retURL` to another host, and markup in text parameters. Call `@RemoteAction` methods directly, inside `System.runAs`.
+General test rules (assertions, test data, `runAs`, `startTest`) are in [Testing](apex.md#testing).
+
+- Set the page with `Test.setCurrentPage`, put the URL parameters a caller would send, and construct the controller the way the page does.
+- Assert the navigation (`PageReference.getUrl()`), the messages (`ApexPages.hasMessages(ApexPages.Severity.ERROR)`), and the data.
+- Cover hostile input: an Id of another type, a record the user can't see, a `retURL` to another host, and markup in text parameters.
+- Call `@RemoteAction` methods directly, inside `System.runAs`.
 
 ```apex
-// ✅ Page context, a least-privilege user, and asserted outcomes, instead of an admin run with no asserts
-@IsTest
-private inherited sharing class InvoiceVoidExtensionTest {
-    @IsTest
-    static void viewerCannotVoid() {
-        Invoice__c invoice = TestDataFactory.createInvoice();
-        Test.setCurrentPage(Page.InvoiceVoid);
-        ApexPages.currentPage().getParameters().put('id', invoice.Id);
-        System.runAs(TestDataFactory.createUser('Invoice_Viewer')) { // the factory wraps setup-object DML in runAs
-            try {
-                new InvoiceVoidExtension(new ApexPages.StandardController(invoice)).voidInvoice();
-                Assert.fail('A read-only user must not void invoices');
-            } catch (DmlException expected) { /* user-mode DML rejected the write */ }
-        }
-        Assert.areNotEqual('Void', [SELECT Status__c FROM Invoice__c WHERE Id = :invoice.Id].Status__c, 'The invoice is unchanged');
-    }
+// ✅ Page context, a least-privilege user, and asserted outcomes (the factory wraps setup-object DML in runAs)
+Test.setCurrentPage(Page.InvoiceVoid);
+ApexPages.currentPage().getParameters().put('id', invoice.Id);
+System.runAs(TestDataFactory.createUser('Invoice_Viewer')) {
+    try {
+        new InvoiceVoidExtension(new ApexPages.StandardController(invoice)).voidInvoice();
+        Assert.fail('A read-only user must not void invoices');
+    } catch (DmlException expected) { /* user-mode DML rejected the write */ }
 }
+Assert.areNotEqual('Void', [SELECT Status__c FROM Invoice__c WHERE Id = :invoice.Id].Status__c, 'The invoice is unchanged');
 ```
-
----
-
-## Review Checklist
-
-### Encoding
-- [ ] No `escape="false"` or `itemEscaped="false"` around data the page doesn't control; wrapped values use `HTMLENCODE`
-- [ ] Merge fields in `<script>` and event handlers use `JSENCODE`; values written to `innerHTML` use `JSENCODE(HTMLENCODE())`
-- [ ] The page fixes each URL's scheme and host and `URLENCODE`s parameters; no merge fields in `<style>` or `style`
-- [ ] Page parameters stay data in Apex; no `addError(message, false)` with user input
-
-### CSRF
-- [ ] No DML in constructors, getters, initializers, `init()` methods, or `<apex:page action>`
-- [ ] State changes happen only in form POSTs the user starts; nothing auto-submits on load
-- [ ] Delete-button overrides that act on load set `confirmationTokenRequired`
-
-### Controller security
-- [ ] The controller's `<apiVersion>` was read; every controller and extension declares its sharing and uses user mode
-- [ ] Extensions don't copy protected fields into String or wrapper properties
-- [ ] URL Ids are parsed, type-checked, bound, and looked up in user mode; redirects stay local
-
-### View state & performance
-- [ ] Rebuildable fields are `transient`, one `<apex:form>` per page, and view state stays well under 170 KB
-- [ ] Large lists page through `StandardSetController`; getters query at most once per request
-- [ ] Large read-only pages use `readOnly="true"`; pollers are slow, light, and switched off when done
-
-### Remoting
-- [ ] Every `@RemoteAction` class declares sharing, validates arguments, and queries in user mode
-- [ ] Remoting keeps `escape: true` or writes raw values only as text; Remote Objects list only needed fields
-
-### Tests
-- [ ] Controller tests set the page and parameters, run as a least-privilege user, and assert navigation, messages, and data
-- [ ] Hostile inputs (foreign Ids, hidden records, external `retURL`, markup) have tests
 
 ---
 
@@ -491,10 +437,5 @@ private inherited sharing class InvoiceVoidExtensionTest {
 - [Security Tips for Apex and Visualforce Development (Visualforce Developer Guide)](https://developer.salesforce.com/docs/atlas.en-us.pages.meta/pages/pages_security_tips_intro.htm)
 - [Cross-Site Request Forgery (Visualforce Developer Guide)](https://developer.salesforce.com/docs/atlas.en-us.pages.meta/pages/pages_security_tips_csrf.htm)
 - [Secure Coding: Cross Site Scripting (Salesforce Developers)](https://developer.salesforce.com/docs/atlas.en-us.secure_coding_guide.meta/secure_coding_guide/secure_coding_cross_site_scripting.htm)
-- [View State best practices (Visualforce Developer Guide)](https://developer.salesforce.com/docs/atlas.en-us.pages.meta/pages/pages_best_practices_perf_view_state.htm)
 - [Visualforce limits (Visualforce Developer Guide)](https://developer.salesforce.com/docs/atlas.en-us.pages.meta/pages/pages_apex_governor_limits.htm)
-- [JavaScript Remoting for Apex Controllers (Visualforce Developer Guide)](https://developer.salesforce.com/docs/atlas.en-us.pages.meta/pages/pages_js_remoting.htm)
-- [Visualforce Remote Objects (Visualforce Developer Guide)](https://developer.salesforce.com/docs/atlas.en-us.pages.meta/pages/pages_remote_objects.htm)
-- [ApexPage metadata type (Metadata API Developer Guide)](https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_pages.htm)
-- [PMD Visualforce rules](https://docs.pmd-code.org/latest/pmd_rules_visualforce.html)
-- [PMD Apex security rules](https://docs.pmd-code.org/latest/pmd_rules_apex_security.html)
+- [StandardSetController Class (Apex Reference Guide)](https://developer.salesforce.com/docs/atlas.en-us.apexref.meta/apexref/apex_pages_standardsetcontroller.htm)

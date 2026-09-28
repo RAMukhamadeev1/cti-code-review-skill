@@ -1,31 +1,26 @@
 # Common Bugs Checklist
 
-Quick-reference bug patterns organized by category. For detailed code examples, explanations, and comprehensive review checklists, see the dedicated language guides linked below.
+Quick-reference bug patterns organized by category; the language guides linked below hold the examples and explanations. Severity comes from the guide that owns each pattern, and Salesforce defaults from [Severity Calibration](salesforce/platform.md#severity-calibration). Items the repo's linter or type checker already enforces are not findings unless the diff disables the rule, and code the diff doesn't touch is not a finding unless the change makes it worse.
 
 ## Universal Issues
 
 ### Logic Errors
-- [ ] Off-by-one errors in loops and array access
-- [ ] Incorrect boolean logic (De Morgan's law violations)
-- [ ] Missing null/undefined checks
-- [ ] Race conditions in concurrent code
-- [ ] Incorrect comparison operators (`==` vs `===`, `=` vs `==`)
-- [ ] Integer overflow/underflow
-- [ ] Floating point comparison issues
+
+- [ ] Off-by-one errors in loops, slices, and ranges
+- [ ] Inverted or incomplete boolean logic (De Morgan's law)
+- [ ] Missing null/undefined checks where the type or the contract allows the value to be absent
+- [ ] Races across an `await` or between transactions ([Async & Concurrency](cross-cutting/async-concurrency-patterns.md))
+- [ ] Integer overflow, and equality comparisons on floating-point values
 
 ### Resource Management
-- [ ] Memory leaks (unclosed connections, listeners)
-- [ ] File handles not closed
-- [ ] Database connections not released
-- [ ] Event listeners not removed
-- [ ] Timers/intervals not cleared
+
+- [ ] Connections, file handles, and streams not closed or released on every path, including errors
+- [ ] Listeners, timers, intervals, and subscriptions not removed on teardown
 
 ### Error Handling
-- [ ] Swallowed exceptions (empty catch blocks)
-- [ ] Generic exception handling hiding specific errors
-- [ ] Missing error propagation
-- [ ] Incorrect error types thrown
-- [ ] Missing finally/cleanup blocks
+
+- [ ] Swallowed exceptions (empty catch blocks), or generic handlers that hide specific errors
+- [ ] Errors not propagated, or rethrown with the wrong type or without the cause ([Error Handling](cross-cutting/error-handling-principles.md))
 
 ## JavaScript
 
@@ -36,7 +31,7 @@ Quick-reference bug patterns organized by category. For detailed code examples, 
 - [ ] `fetch` assumed to reject on HTTP errors (it resolves on 4xx/5xx; check `response.ok`)
 - [ ] Methods passed as callbacks lose `this` (`setTimeout(this.save, 0)`; bind them or use an arrow function)
 - [ ] `var` in a loop captured by closures (every callback sees the last value; use `let`)
-- [ ] `parseInt` without a radix (`parseInt('0x1f')` is `31`; pass `10` or use `Number()`)
+- [ ] `parseInt` without a radix (`parseInt('0x1f')` is `31`; pass the radix: `parseInt(s, 10)`). `Number()` is not a drop-in fix: `Number('0x1f')` is also `31`, and `Number('')` is `0`
 - [ ] `sort()` on numbers without a comparator (`[10, 9, 1].sort()` gives `[1, 10, 9]`), or in-place `sort()`/`reverse()` on a shared array (use `toSorted()`/`toReversed()`)
 - [ ] Removing array elements while iterating (`splice` inside `forEach` or an index loop skips elements)
 - [ ] Binary floats for money (`0.1 + 0.2 !== 0.3`; use integer minor units or a decimal library)
@@ -92,11 +87,13 @@ Quick-reference bug patterns organized by category. For detailed code examples, 
 - [ ] Bare `except:` catching `KeyboardInterrupt` and `SystemExit`
 - [ ] Shared mutable class attributes (`class C: items = []`)
 - [ ] Using `is` instead of `==` for value comparison
-- [ ] Forgetting `self` parameter in methods
-- [ ] Modifying list while iterating
-- [ ] String concatenation in loops (use `"".join()`)
-- [ ] Not closing files (use `with` statement)
-- [ ] Missing type annotations on public functions
+- [ ] Modifying a list or dict while iterating over it
+- [ ] Closures created in a loop that all see the loop variable's last value (`lambda: i`; bind it with a default argument such as `lambda i=i: i`)
+- [ ] Naive datetimes mixed with aware ones, or `datetime.utcnow()` (naive, deprecated since Python 3.12; use `datetime.now(timezone.utc)`)
+- [ ] Binary floats for money (use `Decimal` or integer minor units)
+- [ ] `requests` calls without `timeout=` (requests has no default timeout, so a stalled server hangs the caller)
+- [ ] Blocking calls inside `async def` (`requests`, `time.sleep`), or `asyncio.create_task` results that nothing keeps a reference to
+- [ ] Files and connections opened without `with`, so they aren't closed on errors
 
 **Full guide:** [Python Guide](python.md)
 
@@ -133,7 +130,7 @@ Quick-reference bug patterns organized by category. For detailed code examples, 
 **Visualforce:**
 - [ ] `escape="false"` on `apex:outputText` (or any component) with user-controlled data
 - [ ] Merge fields inside `<script>` or URLs without `JSENCODE`, `JSINHTMLENCODE`, or `URLENCODE` (for example `'{!$CurrentPage.parameters.q}'`)
-- [ ] DML in a controller constructor, a getter, or a `<apex:page action>` method (it runs on a GET page load with no CSRF token; PMD `ApexCSRF`, `VfCsrf`)
+- [ ] DML that runs on page load: an `<apex:page action>` method runs on a GET without a CSRF token (PMD `ApexCSRF`, `VfCsrf`); DML in a controller constructor or getter fails at page load with "DML currently not allowed" (verify)
 - [ ] Large collections or query results kept in non-`transient` controller fields, bloating view state
 
 **Flows:**
@@ -155,10 +152,10 @@ Quick-reference bug patterns organized by category. For detailed code examples, 
 ## SQL
 
 - [ ] String concatenation for queries (SQL injection risk) — use parameterized queries
-- [ ] Missing indexes on filtered/joined columns
-- [ ] `SELECT *` instead of specific columns
-- [ ] N+1 query patterns
-- [ ] Missing `LIMIT` on large tables
+- [ ] New filters or joins on large tables with no matching index in the migrations (ask the author when the schema isn't in the repo)
+- [ ] `SELECT *` that pulls large columns through a hot path, or leaks columns added later into an API response
+- [ ] N+1 query patterns ([N+1 Queries](cross-cutting/n-plus-one-queries.md))
+- [ ] Unbounded queries on tables that grow (no `LIMIT` or pagination on a request path), or pagination without a deterministic `ORDER BY`
 - [ ] Not handling `NULL` comparisons correctly (`IS NULL` vs `= NULL`)
 - [ ] Missing transactions for related operations
 - [ ] Incorrect JOIN types
@@ -169,19 +166,14 @@ Quick-reference bug patterns organized by category. For detailed code examples, 
 
 ## API Design
 
-- [ ] Inconsistent resource naming
-- [ ] Wrong HTTP methods (POST for idempotent operations)
-- [ ] Missing pagination for list endpoints
-- [ ] Incorrect status codes
-- [ ] Missing rate limiting
-- [ ] Missing input validation and sanitization
-- [ ] Trusting client-side validation only
+- [ ] State-changing `GET` handlers (link prefetchers, crawlers, and CSRF can trigger them), or `PUT` and `DELETE` handlers that aren't idempotent, so a retry repeats the effect
+- [ ] Status codes that hide failures (`200` with an error body) or blame the client for server errors
+- [ ] Validation done only on the client; pagination, caching, and rate limits are in [API Performance](performance-review-guide.md#api-performance)
 
 ## Testing
 
 - [ ] Testing implementation details instead of behavior
-- [ ] Missing edge case tests
-- [ ] Flaky tests (non-deterministic)
-- [ ] Tests with external dependencies (no mocks)
+- [ ] Missing edge case tests for the branches the diff adds
+- [ ] Flaky tests (non-deterministic ordering, timing, or shared state)
+- [ ] Unit tests that reach real external services, the clock, or randomness without a seam (integration tests may use real dependencies on purpose)
 - [ ] Missing negative tests (error cases)
-- [ ] Overly complex test setup

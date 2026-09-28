@@ -1,212 +1,118 @@
 # Async & Concurrency Patterns: Cross-Language Guide
 
-> This guide compares concurrency models and covers common pitfalls, best practices, and structured concurrency patterns, with code examples for JavaScript/TypeScript (Node.js, browsers), Python (asyncio), and Salesforce Apex.
+> Concurrency defects that look alike in JavaScript/TypeScript, Python asyncio, and Apex: races across an `await` or a transaction, leaked or unobserved work, a blocked event loop, lost cancellation, and unbounded fan-out.
+> Related: language details in [JavaScript](../javascript.md#async--promises), [Node.js](../nodejs.md#event-loop--cpu-bound-work), [Python](../python.md#asynchronous-programming), and [Apex](../salesforce/apex.md#async-apex)
 
-## Table of Contents
+## Review Checklist
 
-- [Concurrency Models Compared](#concurrency-models-compared)
-- [Common Pitfalls](#common-pitfalls)
-- [Best Practices](#best-practices)
-- [Code Examples by Language](#code-examples-by-language)
-- [Review Checklist](#review-checklist)
+Read this checklist first; open a section only when the diff contains its pattern.
 
----
+### Races → [Race conditions across await and transactions](#race-conditions-across-await-and-transactions)
 
-## Concurrency Models Compared
+- [ ] State read before an `await` is re-checked after it, or the check and the write happen in one atomic step.
+- [ ] Records that several transactions read, compute from, and write back are locked (`SELECT ... FOR UPDATE`) or recomputed idempotently.
+- [ ] Code that takes two locks takes them in the same order everywhere.
 
-| Model | Languages | Core concepts | Pros | Cons |
-|------|------|----------|------|------|
-| **async/await + Event Loop** | JavaScript/TypeScript (Node.js, browsers), Python (asyncio) | Single-threaded cooperative multitasking | No locks, easy to reason about | Must never block the event loop |
-| **Worker threads / processes** | Node `worker_threads`, Web Workers, Python `multiprocessing` / `ProcessPoolExecutor` | Separate threads or processes that exchange messages | True parallelism for CPU-bound work | Startup and serialization cost; no shared state by default |
-| **Threads + locks** | Python `threading` (the GIL runs one thread of Python code at a time; free-threaded builds: experimental in 3.13, officially supported but optional in 3.14) | OS threads + shared memory | Blocking I/O runs in parallel; CPU parallelism only on free-threaded builds | Complex lock management, deadlock risk |
-| **Asynchronous Apex** | Salesforce | Queueable / Batch / `@future` / Platform Events; each job is a new transaction with fresh limits | Platform-managed | No shared memory; enqueue limits; no ordering guarantee between jobs |
+### Leaked work → [Leaked tasks and fire-and-forget work](#leaked-tasks-and-fire-and-forget-work)
 
-Asynchronous Apex limits (jobs per transaction, daily executions) live in [Governor Limits](../salesforce/platform.md#governor-limits).
+- [ ] Every promise is awaited, returned, or handed to an owner that handles its rejection. A side effect whose failure must not fail the request is caught and logged, or queued durably. In Node.js an unhandled rejection exits the process by default, so a floating promise that can reject on a server path is 🔴.
+- [ ] Python: tasks from `asyncio.create_task` are owned by a `TaskGroup` or kept in a strong reference, and their exceptions are observed.
+- [ ] Intervals and timers the diff starts are cleared on shutdown or teardown.
 
-### When to choose what
+### Blocking → [Blocking in an async context](#blocking-in-an-async-context)
 
-```
-I/O-bound (network, database, files):
-  → async/await (JavaScript/TypeScript, Python asyncio)
+- [ ] No synchronous I/O or CPU-heavy work inside async handlers (`requests`, `time.sleep`, `readFileSync`, `pbkdf2Sync`, `JSON.parse` of large bodies). Startup code and CLI scripts are exempt.
+- [ ] CPU-bound work runs in worker threads or processes, not on the event loop.
 
-CPU-bound (computation, image processing):
-  → worker_threads (Node.js), Web Workers (browsers)
-  → multiprocessing / ProcessPoolExecutor (Python)
+### Cancellation → [1. Structured concurrency](#1-structured-concurrency) · [2. Cancellation propagation](#2-cancellation-propagation)
 
-Mixed:
-  → async + a worker-thread pool (Node.js)
-  → async + run_in_executor / asyncio.to_thread (Python)
+- [ ] Tasks started together are awaited together; when one fails, the others are cancelled if they must not keep running (`asyncio.TaskGroup`; `Promise.all` with a shared `AbortSignal`).
+- [ ] A signal or timeout that a function accepts reaches every I/O call below it.
+- [ ] `CancelledError` and `AbortError` are re-raised or rethrown after cleanup, never swallowed.
+- [ ] Outbound I/O and long-running tasks have a timeout.
 
-Salesforce Apex (no threads; every async job is a separate transaction):
-  → Queueable: follow-up work after the current transaction, chaining, callouts
-  → Batch Apex: large record sets processed in chunks
-  → Platform Events: decoupled, event-driven processing
-  → @future: legacy; prefer Queueable in new code
-```
+### Limits → [3. Backpressure](#3-backpressure) · [4. Limit concurrency](#4-limit-concurrency)
+
+- [ ] Fan-out over input that grows with data (ids, URLs, files) is bounded by a semaphore or a worker pool. A fixed handful of independent calls in one `Promise.all` or `gather` needs no limit.
+- [ ] Streams are connected with `pipeline()`; producer/consumer queues have a maximum size.
+
+### Apex → [Salesforce Apex: Queueable, Finalizer, Locking](#salesforce-apex-queueable-finalizer-locking)
+
+- [ ] A batch of records is enqueued as one job per transaction, never one job per record ([row 1 of Severity Calibration](../salesforce/platform.md#severity-calibration): 🔴).
+- [ ] Chains and retries are bounded, and jobs are idempotent.
+- [ ] A Queueable that must report or recover from its own failure (retry, alert, compensating update) attaches a Finalizer; a job whose failure is already visible or harmless needs none.
+- [ ] Nothing depends on the order of separately enqueued jobs, or on the enqueuing user's context when the job runs as another user.
+- [ ] Lock waits (`UNABLE_TO_LOCK_ROW`) and failed jobs are runtime evidence: ask the author when a finding depends on them.
 
 ---
 
 ## Common Pitfalls
 
-### Pitfall 1: Race condition
+### Race conditions across await and transactions
 
-Several concurrent tasks read and write shared state, and the result depends on the order in which they run.
+Single-threaded code still races. In JavaScript and asyncio, other work runs at every `await`, so state read before it can be stale after it (check-then-act across an `await`). Across processes and transactions the database is the shared state: make the check and the write one atomic statement, or lock the rows ([TOCTOU](../code-quality-universal.md#toctou-race-conditions)). In Apex, concurrent transactions race on the same records; lock them with `FOR UPDATE` ([Salesforce Apex](#salesforce-apex-queueable-finalizer-locking)). For UI code that renders a slow, older response over a newer one, see [stale async results](../javascript.md#race-conditions-cancel-or-ignore-stale-results).
 
-```
-// Generic pseudocode
-counter = 0
+Deadlocks come from taking two locks in opposite orders. In Node.js, a recursive `process.nextTick()` or an endless microtask chain starves I/O callbacks ([Event Loop & CPU-Bound Work](../nodejs.md#event-loop--cpu-bound-work)).
 
-task1: counter += 1   // reads counter=0, writes counter=1
-task2: counter += 1   // reads counter=0, writes counter=1
-// expected counter=2, actual counter=1
-```
-
-**Solution**: mutexes, atomic operations, or encapsulating the shared state in an actor.
-
-Single-threaded code is not immune. In JavaScript and asyncio, state read before an `await` can be stale after it (check-then-act across an `await`). In Apex, concurrent transactions race on the same records; lock them with `FOR UPDATE` (see [Salesforce Apex: Queueable, Finalizer, Locking](#salesforce-apex-queueable-finalizer-locking)).
-
-> 📖 [TOCTOU race conditions](../code-quality-universal.md#toctou-race-conditions) · [Stale async results in UI code](../javascript.md#race-conditions-cancel-or-ignore-stale-results)
-
-### Pitfall 2: Deadlock
-
-Two or more tasks each wait for a lock that the other one holds.
-
-```
-task1: lock(A); lock(B);  // holds A, waits for B
-task2: lock(B); lock(A);  // holds B, waits for A
-// both wait forever
-```
-
-**Solution**:
-- A consistent lock acquisition order
-- Locks with timeouts (tryLock with timeout)
-- No nested locks
-
-### Pitfall 3: Starvation
-
-Low-priority tasks never get a chance to run.
-
-```
-// High-priority tasks keep arriving; low-priority tasks wait in the queue forever
-```
-
-**Solution**: fair locks, task priority queues, and limits on concurrency.
-
-In Node.js, a recursive `process.nextTick()` or an endless chain of microtasks starves I/O callbacks the same way (see [Event Loop & CPU-Bound Work](../nodejs.md#event-loop--cpu-bound-work)).
-
-### Pitfall 4: Leaked tasks and fire-and-forget work
-
-Concurrent work is started, but nothing makes sure it finishes, fails visibly, or stops.
+### Leaked tasks and fire-and-forget work
 
 ```typescript
-// ❌ Fire-and-forget: nobody awaits the promise, so a rejection is unhandled
-//    (Node.js exits on unhandled rejections by default) and shutdown can cut the work off
+// ❌ Floating promise: a rejection is unhandled (Node.js exits on unhandled rejections by
+//    default), and shutdown can cut the email off
 async function createOrder(input: OrderInput): Promise<Order> {
     const order = await orders.insert(input);
-    sendConfirmationEmail(order); // floating promise
+    sendConfirmationEmail(order);
     return order;
 }
 
-// ❌ An interval that is never cleared keeps running after its owner is gone
-//    (and keeps the Node.js process alive)
-function startCacheRefresh(): void {
-    setInterval(refreshCache, 60_000);
-}
-
-// ✅ Await the work (or hand it to a durable job queue that owns retries and errors)
+// ✅ Own the side effect. The order is already committed, so an email failure is logged instead
+//    of failing the request (a client retry would create a duplicate order). A durable job
+//    queue or outbox is the stronger fix when the email must arrive.
 async function createOrder(input: OrderInput): Promise<Order> {
     const order = await orders.insert(input);
-    await sendConfirmationEmail(order);
+    try {
+        await sendConfirmationEmail(order);
+    } catch (err: unknown) {
+        logger.error({ err, orderId: order.id }, 'confirmation email failed');
+    }
     return order;
-}
-
-// ✅ Keep the handle, handle each run's errors, and clear it on shutdown or teardown
-function startCacheRefresh(): () => void {
-    const timer = setInterval(() => {
-        refreshCache().catch((err) => logger.error({ err }, 'cache refresh failed'));
-    }, 60_000);
-    return () => clearInterval(timer);
 }
 ```
 
 ```python
-# ❌ Python: task leak
-async def process():
-    task = asyncio.create_task(long_running())
-    # the function returns, but the task keeps running
-
-# ❌ No reference kept: the event loop holds tasks only weakly, so this task can be
-#    garbage-collected before it finishes, and nobody handles its exception
+# ❌ No reference kept: the event loop holds tasks only weakly, so the task can be
+#    garbage-collected before it finishes, and its exception is never observed
 asyncio.create_task(send_email(order))
 
-# ✅ If work must outlive the caller, keep a strong reference until it is done
+# ✅ Work that must outlive the caller: keep a strong reference and observe the outcome
 background_tasks: set[asyncio.Task[None]] = set()
+
+def _on_done(task: asyncio.Task[None]) -> None:
+    background_tasks.discard(task)
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        logger.error("background task failed", exc_info=exc)
 
 task = asyncio.create_task(send_email(order))
 background_tasks.add(task)
-task.add_done_callback(background_tasks.discard)
+task.add_done_callback(_on_done)
 ```
 
-**Solution**: `asyncio.TaskGroup` (Python 3.11+); in JavaScript, await every promise or track it and cancel it with an `AbortController`; clear timers (`clearInterval`, `clearTimeout`) on shutdown or teardown.
+Work that the caller can wait for belongs in a `TaskGroup` ([Structured concurrency](#1-structured-concurrency)). Intervals and timers need a kept handle and a clear on teardown. More: [No floating promises](../javascript.md#no-floating-promises) · [Clean up listeners, timers, and observers](../javascript.md#clean-up-listeners-timers-and-observers).
 
-> 📖 [No floating promises](../javascript.md#no-floating-promises) · [Clean up listeners, timers, and observers](../javascript.md#clean-up-listeners-timers-and-observers)
-
-### Pitfall 5: Blocking in an async context
+### Blocking in an async context
 
 ```python
-# ❌ Python: synchronous I/O in an async function blocks the event loop
-async def handle():
-    result = requests.get(url)  # blocks! the whole event loop stalls
-    return result
+# ❌ Synchronous I/O in an async function stalls the whole event loop
+async def fetch_profile(url: str) -> str:
+    return requests.get(url, timeout=10).text
 
-# ✅ Use async I/O with one shared ClientSession (the calling coroutine opens it once and passes it in)
-async def handle(session: aiohttp.ClientSession):
-    async with session.get(url) as resp:  # non-blocking
-        return await resp.text()
-
-# or run the synchronous code in a thread pool
-async def handle():
-    result = await asyncio.to_thread(requests.get, url)
-    return result
+# ✅ Run the blocking call in a thread, or use an async client (aiohttp, httpx.AsyncClient)
+async def fetch_profile(url: str) -> str:
+    response = await asyncio.to_thread(requests.get, url, timeout=10)
+    return response.text
 ```
 
-```typescript
-import { pbkdf2, pbkdf2Sync } from 'node:crypto';
-import { once } from 'node:events';
-import { readFileSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { promisify } from 'node:util';
-import { Worker } from 'node:worker_threads';
-
-const pbkdf2Async = promisify(pbkdf2);
-
-// ❌ Node.js: synchronous calls in a request handler stall every other request
-//    (readFileSync is fine at startup, not per request)
-function getInvoiceTemplate(): string {
-    return readFileSync('templates/invoice.html', 'utf8');
-}
-function hashPassword(password: string, salt: Buffer): Buffer {
-    return pbkdf2Sync(password, salt, 600_000, 32, 'sha256');
-}
-
-// ✅ Async APIs run the work on the libuv thread pool; the event loop stays free
-function getInvoiceTemplate(): Promise<string> {
-    return readFile('templates/invoice.html', 'utf8');
-}
-function hashPassword(password: string, salt: Buffer): Promise<Buffer> {
-    return pbkdf2Async(password, salt, 600_000, 32, 'sha256');
-}
-
-// ✅ Pure JavaScript CPU work (report rendering, large data transforms) goes to a worker thread
-async function renderReport(rows: ReportRow[]): Promise<string> {
-    const worker = new Worker(new URL('./render-report.js', import.meta.url), { workerData: rows });
-    const [html] = await once(worker, 'message'); // rejects if the worker emits 'error'
-    return html;
-}
-// 💡 Reuse a small pool of workers for frequent jobs; starting one per request is expensive
-```
-
-> 📖 [Don't block the event loop or main thread](../javascript.md#dont-block-the-event-loop-or-main-thread) · [Event Loop & CPU-Bound Work](../nodejs.md#event-loop--cpu-bound-work)
+In Node.js, `readFileSync` or `pbkdf2Sync` per request, synchronous `zlib` calls, and `JSON.parse` of multi-megabyte bodies stall every request; the same calls at startup are fine. Use the asynchronous APIs, which run on the libuv thread pool, or a worker thread for pure JavaScript CPU work ([Event Loop & CPU-Bound Work](../nodejs.md#event-loop--cpu-bound-work), [Don't block the event loop or main thread](../javascript.md#dont-block-the-event-loop-or-main-thread)).
 
 ---
 
@@ -214,39 +120,20 @@ async function renderReport(rows: ReportRow[]): Promise<string> {
 
 ### 1. Structured concurrency
 
-Tie the lifetime of concurrent tasks to the scope that created them. When the parent is cancelled, its children are cancelled automatically.
+Tie the lifetime of concurrent tasks to the scope that started them, so a failure or a cancellation stops the siblings.
 
 ```python
-# ✅ Python 3.11+: TaskGroup
-async def process_items():
-    async with asyncio.TaskGroup() as tg:
-        for item in items:
-            tg.create_task(process_item(item))
-    # the TaskGroup waits for every task when the block exits
-    # if one task fails, the remaining tasks are cancelled automatically
+# ✅ Python 3.11+: the block waits for every task; the first failure cancels the rest
+async with asyncio.TaskGroup() as tg:
+    for item in items:
+        tg.create_task(process_item(item))
 ```
 
-```typescript
-// ✅ JavaScript: Promise.all rejects on the first failure but does NOT stop the other
-//    promises. Share one AbortController so the siblings are cancelled too, and wait
-//    for them to settle before returning.
-async function processItems(items: Item[], parentSignal: AbortSignal): Promise<Result[]> {
-    const controller = new AbortController();
-    const signal = AbortSignal.any([parentSignal, controller.signal]);
-    const tasks = items.map((item) => processItem(item, { signal })); // processItem must honor the signal
-    try {
-        return await Promise.all(tasks);
-    } catch (err) {
-        controller.abort(err); // cancel the siblings that are still running
-        await Promise.allSettled(tasks); // and wait until they have stopped
-        throw err;
-    }
-}
-```
+In JavaScript, `Promise.all` rejects at the first failure but does not stop the other promises. When they must stop, pass them one `AbortSignal` (combine it with the caller's signal through `AbortSignal.any`), abort it in `catch`, and await `Promise.allSettled` on the started promises before rethrowing, so nothing keeps running after the function returns ([Combinators, loops, and promise plumbing](../javascript.md#combinators-loops-and-promise-plumbing)).
 
 ### 2. Cancellation propagation
 
-Make sure a cancellation signal reaches every subtask. Swallowing the cancellation (`AbortError`, `asyncio.CancelledError`) breaks it for every caller up the chain.
+A cancellation signal must reach every subtask. Swallowing the cancellation (`AbortError`, `asyncio.CancelledError`) breaks it for every caller up the chain.
 
 ```typescript
 // ❌ The signal stops at the first layer: saveCustomer keeps running after a timeout
@@ -262,104 +149,47 @@ async function syncCustomer(id: string, userSignal: AbortSignal): Promise<void> 
     const customer = await fetchCustomer(id, { signal });
     await saveCustomer(customer, { signal });
 }
-
-async function fetchCustomer(id: string, { signal }: { signal: AbortSignal }): Promise<Customer> {
-    const response = await fetch(`${API_URL}/customers/${encodeURIComponent(id)}`, { signal });
-    if (!response.ok) {
-        throw new Error(`GET customer ${id} failed with HTTP ${response.status}`);
-    }
-    return parseCustomer(await response.json());
-}
 ```
 
-```python
-# ✅ Python 3.11+: asyncio.timeout cancels everything inside the block and raises TimeoutError
-async def sync_customer(customer_id: str) -> None:
-    async with asyncio.timeout(30):
-        customer = await fetch_customer(customer_id)
-        await save_customer(customer)
+In Python 3.11+, `async with asyncio.timeout(30):` cancels everything inside the block and raises `TimeoutError`.
 
-# ✅ Clean up on cancellation, then re-raise so the cancellation keeps propagating
+```python
+# ✅ Clean up in finally, so cancellation still propagates (swallowing CancelledError
+#    breaks TaskGroup and asyncio.timeout), and mark every item done even when handle() raises
 async def consume(queue: asyncio.Queue[Job]) -> None:
     try:
         while True:
             job = await queue.get()
-            await handle(job)
-            queue.task_done()
-    except asyncio.CancelledError:
+            try:
+                await handle(job)
+            finally:
+                queue.task_done()
+    finally:
         await release_resources()
-        raise  # swallowing CancelledError breaks TaskGroup and asyncio.timeout
 ```
 
 > 📖 [Timeouts with AbortSignal](../javascript.md#timeouts-with-abortsignal)
 
 ### 3. Backpressure
 
-When a producer is much faster than its consumer, bound the queue size so memory does not balloon.
-
-```typescript
-import { createReadStream, createWriteStream } from 'node:fs';
-import { pipeline } from 'node:stream/promises';
-import { createGzip } from 'node:zlib';
-
-// ❌ write() returning false is ignored: a fast reader fills memory, and errors are not forwarded
-const source = createReadStream('export.csv');
-const destination = createWriteStream('backup/export.csv');
-source.on('data', (chunk) => destination.write(chunk));
-
-// ✅ pipeline() respects backpressure, forwards errors, and destroys every stream on failure
-await pipeline(
-    createReadStream('export.csv'),
-    createGzip(),
-    createWriteStream('backup/export.csv.gz'),
-);
-```
+When a producer is faster than its consumer, bound the buffer between them so memory cannot grow without limit. In Node.js, connect streams with `pipeline()` from `node:stream/promises`, which respects backpressure, forwards errors, and destroys every stream on failure; a `'data'` handler that ignores `write()` returning `false` buffers the whole input ([Streams & Backpressure](../nodejs.md#streams--backpressure)).
 
 ```python
-# ✅ Python: a bounded asyncio.Queue makes the producer wait when the consumers fall behind
-async def produce(queue: asyncio.Queue[Item]) -> None:
-    async for item in fetch_items():
-        await queue.put(item)  # suspends while the queue is full
-
-async def consume(queue: asyncio.Queue[Item]) -> None:
-    while True:
-        item = await queue.get()
-        try:
-            await process(item)
-        finally:
-            queue.task_done()
-
+# ✅ A bounded asyncio.Queue makes the producer wait when the consumers fall behind
 async def run() -> None:
     queue: asyncio.Queue[Item] = asyncio.Queue(maxsize=100)
     async with asyncio.TaskGroup() as tg:
         consumers = [tg.create_task(consume(queue)) for _ in range(5)]
-        await produce(queue)
+        async for item in fetch_items():
+            await queue.put(item)  # suspends while the queue is full
         await queue.join()  # every queued item has been processed
         for task in consumers:
             task.cancel()
 ```
 
-> 📖 [Streams & Backpressure in Node.js](../nodejs.md#streams--backpressure)
-
 ### 4. Limit concurrency
 
-Keep a burst of work from starting so many tasks at once that resources run out.
-
-```python
-# ✅ Python: a Semaphore limits concurrency; one shared ClientSession serves every request
-async def fetch_all(urls: list[str], max_concurrent: int = 10):
-    semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def fetch_one(session: aiohttp.ClientSession, url: str):
-        async with semaphore:
-            async with session.get(url) as resp:
-                return await resp.text()
-
-    async with aiohttp.ClientSession() as session:
-        return await asyncio.gather(*[fetch_one(session, url) for url in urls])
-```
-
-In JavaScript/TypeScript, use a fixed-size worker pool: see [TypeScript: Worker-pool concurrency limit](#typescript-worker-pool-concurrency-limit). In Apex, the platform bounds concurrency for you; your part is to enqueue one job for a batch of records, not one per record (see [Salesforce Apex: Queueable, Finalizer, Locking](#salesforce-apex-queueable-finalizer-locking)).
+Bound fan-out over input that grows with data, so a burst doesn't exhaust sockets, memory, or the downstream rate limit. In Python, acquire an `asyncio.Semaphore` inside tasks owned by a `TaskGroup` ([example](#python-asyncio--taskgroup)); `asyncio.gather` with a semaphore bounds concurrency too, but it doesn't cancel the other tasks when one fails. In JavaScript/TypeScript, use a fixed-size worker pool ([example](#typescript-worker-pool-concurrency-limit)). In Apex, the platform schedules jobs; your part is one job per batch of records, not one per record ([Salesforce Apex](#salesforce-apex-queueable-finalizer-locking)).
 
 ---
 
@@ -368,7 +198,7 @@ In JavaScript/TypeScript, use a fixed-size worker pool: see [TypeScript: Worker-
 ### Python: asyncio + TaskGroup
 
 ```python
-# ✅ Python 3.11+: structured concurrency + bounded concurrency + timeout
+# ✅ Python 3.11+: structured concurrency + bounded concurrency + a per-item timeout
 import asyncio
 
 async def process_batch(items: list[Item], max_concurrent: int = 10) -> list[Result]:
@@ -376,7 +206,7 @@ async def process_batch(items: list[Item], max_concurrent: int = 10) -> list[Res
 
     async def process_one(item: Item) -> Result:
         async with semaphore:
-            async with asyncio.timeout(30):  # per-item timeout
+            async with asyncio.timeout(30):
                 return await process(item)
 
     async with asyncio.TaskGroup() as tg:
@@ -385,40 +215,40 @@ async def process_batch(items: list[Item], max_concurrent: int = 10) -> list[Res
     return [task.result() for task in tasks]
 ```
 
-> 📖 Depth: [Python asynchronous programming](../python.md#asynchronous-programming)
+The first failure cancels the remaining items and raises an `ExceptionGroup`; when every item must be attempted, catch errors inside `process_one` and return them as results. More: [Python asynchronous programming](../python.md#asynchronous-programming).
 
 ### TypeScript: Worker-pool concurrency limit
 
 ```typescript
-// ✅ Worker-pool pattern: a fixed number of workers compete for a shared task queue.
-//    Results are assigned by their original index, so the output order matches the input.
+// ✅ Worker pool: `limit` workers pull [index, item] pairs from one shared iterator, and each
+//    result is stored at its input index, so the output order matches the input order
 async function processWithLimit<T, R>(
-    items: T[],
+    items: readonly T[],
     fn: (item: T) => Promise<R>,
     limit: number,
 ): Promise<R[]> {
-    const results: R[] = [];
-    let index = 0;
-
-    const workers = Array.from({ length: limit }, async () => {
-        while (index < items.length) {
-            const i = index++;
-            results[i] = await fn(items[i]);
+    if (!Number.isInteger(limit) || limit < 1) {
+        throw new RangeError(`limit must be a positive integer, got ${limit}`);
+    }
+    const results = new Array<R>(items.length);
+    const queue = items.entries();
+    const worker = async (): Promise<void> => {
+        for (const [index, item] of queue) {
+            results[index] = await fn(item);
         }
-    });
-
-    await Promise.all(workers);
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
     return results;
 }
-// 💡 If fn rejects, Promise.all rejects at once but the other workers keep pulling items;
-//    pass an AbortSignal (see Structured concurrency) when they must stop early.
+// Note: if fn rejects, Promise.all rejects at once but the other workers keep pulling items;
+// pass an AbortSignal (see Structured concurrency) when they must stop early.
 ```
 
 > 📖 Depth: [JavaScript async and Promises](../javascript.md#async--promises) · [Node.js async error handling](../nodejs.md#async-error-handling)
 
 ### Salesforce Apex: Queueable, Finalizer, Locking
 
-Apex has no threads. Concurrency comes from asynchronous jobs, and each job runs later as a separate transaction with its own limits. The pitfalls above map directly: a job per record floods the queue, an unobserved job fails silently, an unbounded chain never stops, and two transactions that update the same rows race each other.
+Apex has no threads: each asynchronous job runs later as a separate transaction with its own limits. The pitfalls above map directly: a job per record floods the queue, an unobserved job fails silently, an unbounded chain never stops, and two transactions that update the same rows race.
 
 ```apex
 public with sharing class InvoiceTriggerHandler {
@@ -441,7 +271,11 @@ public with sharing class InvoiceTriggerHandler {
     }
 }
 
-public with sharing class AccountBalanceJob implements Queueable {
+// System mode on purpose, and only in this job: the stored total must include every open invoice,
+// whoever enqueued the job. In user mode the SUM would cover only the invoices that user can see,
+// and the update would fail for users who cannot edit Open_Balance__c. The job reads two fields,
+// writes one, and returns nothing to a UI.
+public without sharing class AccountBalanceJob implements Queueable {
     private final Set<Id> accountIds;
     private final Integer attempt;
 
@@ -451,11 +285,12 @@ public with sharing class AccountBalanceJob implements Queueable {
     }
 
     public void execute(QueueableContext context) {
+        // A Finalizer because this job retries on failure
         System.attachFinalizer(new AccountBalanceFinalizer(accountIds, attempt));
 
         // Lock the parent rows so two jobs cannot overwrite each other's totals
         Map<Id, Account> accounts = new Map<Id, Account>([
-            SELECT Id, Open_Balance__c FROM Account WHERE Id IN :accountIds WITH USER_MODE FOR UPDATE
+            SELECT Id, Open_Balance__c FROM Account WHERE Id IN :accountIds WITH SYSTEM_MODE FOR UPDATE
         ]);
         for (Account acc : accounts.values()) {
             acc.Open_Balance__c = 0;
@@ -465,7 +300,7 @@ public with sharing class AccountBalanceJob implements Queueable {
             SELECT Account__c accountId, SUM(Amount__c) total
             FROM Invoice__c
             WHERE Account__c IN :accountIds AND Status__c = 'Open'
-            WITH USER_MODE
+            WITH SYSTEM_MODE
             GROUP BY Account__c
         ]) {
             Account acc = accounts.get((Id) row.get('accountId'));
@@ -473,7 +308,7 @@ public with sharing class AccountBalanceJob implements Queueable {
                 acc.Open_Balance__c = (Decimal) row.get('total');
             }
         }
-        update as user accounts.values();
+        update as system accounts.values();
     }
 }
 
@@ -489,49 +324,19 @@ public with sharing class AccountBalanceFinalizer implements Finalizer {
 
     // Runs in its own transaction after the job ends, whether the job succeeded or failed
     public void execute(FinalizerContext context) {
-        if (context.getResult() == ParentJobResult.UNHANDLED_EXCEPTION) {
-            // log context.getException() with the project's logger, then retry a bounded number of times
-            if (attempt < MAX_ATTEMPTS) {
-                System.enqueueJob(new AccountBalanceJob(accountIds, attempt + 1));
-            }
+        // Log context.getException() with the project's logger, then retry a bounded number of times
+        if (context.getResult() == ParentJobResult.UNHANDLED_EXCEPTION && attempt < MAX_ATTEMPTS) {
+            System.enqueueJob(new AccountBalanceJob(accountIds, attempt + 1));
         }
     }
 }
 ```
 
-Static analysis: PMD `QueueableWithoutFinalizer`.
+Static analysis: PMD `QueueableWithoutFinalizer` flags every Queueable without a Finalizer; report a hit only when the job must report or recover from its own failure.
 
-- **Lock deliberately.** `SELECT ... FOR UPDATE` holds row locks until the transaction ends; a transaction that cannot get a locked row in time fails with `UNABLE_TO_LOCK_ROW`. Lock rows in a consistent order (for example, parents before children) so concurrent jobs cannot deadlock, keep locking transactions short, and expect more contention on skewed data (many children under one parent).
-- **Make jobs idempotent.** Finalizer retries, redelivered platform events, and double submissions all run the same work again: re-query by Id, skip records that are already processed, and recompute values instead of incrementing them.
-- **Async is a new transaction.** The job starts later with its own limits, sees only committed data, and keeps none of the caller's static state. It may also run as a different user than the triggering code: platform event triggers, for example, run as the Automated Process user unless `PlatformEventSubscriberConfig` names another one. Declare sharing on every job class and keep data access in user mode.
+- **Lock deliberately.** `SELECT ... FOR UPDATE` holds row locks until the transaction ends; a transaction that cannot get a locked row in time fails with `UNABLE_TO_LOCK_ROW`. Lock in a consistent order (parents before children), keep locking transactions short, and expect contention on skewed data (many children under one parent).
+- **Make jobs idempotent.** Finalizer retries, redelivered platform events, and double submissions run the same work again: re-query by Id, skip records already processed, and recompute instead of incrementing.
+- **Async is a new transaction.** The job starts later with its own limits, sees only committed data, and keeps none of the caller's static state. It may run as another user: platform event triggers run as the Automated Process user unless `PlatformEventSubscriberConfig` names one. Declare sharing on every job class and keep data access in user mode, except for data that must not depend on who started the job (stored totals, integration sync); keep that system-mode access narrow and commented, as above ([row 4 of Severity Calibration](../salesforce/platform.md#severity-calibration)).
 - **Don't rely on ordering.** Separately enqueued jobs have no guaranteed order; chain them, or do the work in one job, when order matters.
 
 > 📖 Depth: [Async Apex](../salesforce/apex.md#async-apex) · [Transactions & Execution Contexts](../salesforce/platform.md#transactions--execution-contexts) · [Platform Event and CDC Triggers](../salesforce/apex-triggers.md#platform-event-and-cdc-triggers)
-
----
-
-## Review Checklist
-
-### Basic checks
-- [ ] Concurrent tasks have a clear exit path (nothing leaks)
-- [ ] Shared state is properly protected (locks, queues, single-owner state)
-- [ ] No blocking operations run in an async context
-- [ ] Cancellation signals propagate to every subtask
-
-### Architecture checks
-- [ ] Structured concurrency is used (TaskGroup / Promise.all + AbortController)
-- [ ] Concurrency has an upper bound (semaphore / bounded queue / worker pool)
-- [ ] Long-running tasks support timeouts
-- [ ] A backpressure mechanism keeps memory from ballooning
-
-### Performance checks
-- [ ] Concurrency granularity is reasonable (neither too fine nor too coarse)
-- [ ] I/O-bound work uses async; CPU-bound work uses threads or processes
-- [ ] Locks are held for as short a time as possible
-- [ ] No unnecessary awaits (independent operations are not run one after another)
-
-### Language-specific
-- [ ] Python: the event loop is never blocked; TaskGroup manages task lifetimes; `CancelledError` is re-raised after cleanup
-- [ ] TypeScript: no floating promises; `Promise.all` is combined with a concurrency limit; an `AbortSignal` is passed down for cancellation and timeouts
-- [ ] Node.js: no synchronous I/O or CPU-heavy work in request handlers; streams are connected with `pipeline()`
-- [ ] Apex: jobs are enqueued once per transaction, not per record; Queueables attach a Finalizer; chains and retries are bounded; jobs are idempotent

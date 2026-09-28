@@ -1,221 +1,83 @@
-# Error Handling Principles: Cross-Language Guide
+# Error Handling Principles
 
-> This guide covers the core principles of error handling, common anti-patterns, error hierarchy design, and logging best practices. Each principle comes with code examples for JavaScript/TypeScript, Python, and Salesforce Apex.
+Cross-language rules for handling, wrapping, and logging errors in Python, TypeScript, and Apex. Language specifics: [Python](../python.md#exception-handling), [JavaScript](../javascript.md), [Apex](../salesforce/apex.md#transactions--error-handling).
 
-## Table of Contents
+Related: [Security: Error Messages](../security-review-guide.md#error-messages) · [Async & Concurrency](async-concurrency-patterns.md)
 
-- [Core Principles](#core-principles)
-- [Anti-Patterns](#anti-patterns)
-- [Error Hierarchy Design](#error-hierarchy-design)
-- [Logging Best Practices](#logging-best-practices)
-- [Code Examples by Language](#code-examples-by-language)
-- [Review Checklist](#review-checklist)
+## Review Checklist
 
----
+Read this checklist first; open a section only when the diff contains its pattern.
+
+Severity: 🔴 blocking · 🟡 important · 🟢 nit · 💡 suggestion.
+
+### Handling → [Core Principles](#core-principles)
+
+- [ ] 🔴 No error is silently dropped (empty `catch`, `except: pass`, `.catch(() => {})`); narrow, commented ignores such as `contextlib.suppress(FileNotFoundError)` are fine
+- [ ] 🔴 Security checks fail closed: an error in an authorization, signature, or payment check denies
+- [ ] 🟡 Each error is logged once, where it is handled; lower layers re-raise or wrap with context without logging
+- [ ] 🟡 Broad catches (`except Exception`, untyped `catch`) only at boundaries (request handler, job runner, CLI main) that log the stack
+- [ ] 🟡 Wrapped errors keep the cause (`{ cause }`, `raise … from e`); a missing Python `from e` is 🟢 (`__context__` keeps it)
+- [ ] 🟡 Messages name the operation and key IDs, never secrets or PII
+
+### Anti-patterns → [Anti-Patterns](#anti-patterns)
+
+- [ ] 🔴 No `return`, `break`, or `continue` in `finally`
+- [ ] 🟡 Return values that signal failure are checked (`response.ok`, `re.match()` → `None`, partial-success `SaveResult`s)
+- [ ] 🟡 Expected outcomes (not found, invalid input) are return values or typed errors; Python EAFP lookups are fine
+
+### Hierarchy → [Error Hierarchy Design](#error-hierarchy-design)
+
+- [ ] 🟡 Errors that callers handle differently get distinct types under one base class; infrastructure errors are converted at the module boundary
+- [ ] 🟡 Python exceptions keep constructor arguments in `args`; TypeScript errors pass `{ cause }` and set `name`
+- [ ] 💡 Small scripts and libraries don't need a three-tier hierarchy
+
+### Logging → [Logging Best Practices](#logging-best-practices)
+
+- [ ] 🟡 Error logs keep the stack (`logger.exception`, `{ err }`), use structured fields, and follow [Secure Logging](../security-review-guide.md#secure-logging)
+
+### Language specifics → [Code Examples by Language](#code-examples-by-language)
+
+- [ ] 🟡 Outbound HTTP failures, timeouts included, become module errors at the boundary
+- [ ] 🟡 Apex inspects `SaveResult`s after partial-success DML and sends `AuraHandledException` with a safe message
 
 ## Core Principles
 
-### Principle 1: Don't swallow errors
+1. **Don't swallow errors.** Propagate, fall back with a log entry, or crash when the state is unrecoverable; intentional ignores are narrow and commented.
+2. **Add context**: the operation and key parameters ("failed to charge order 12345: gateway timeout after 30 s") via `add_note()`, `raise … from e`, or `{ cause }`.
+3. **Use specific types** so callers can branch (`OrderNotFoundError`, `PaymentTimeoutError`).
+4. **Fail fast**: validate preconditions before side effects or expensive work.
+5. **Handle each error once**: log where it is handled; lower layers add context and re-raise.
+6. **Fail closed** (OWASP A10:2025): when a security decision or a transaction errors, deny and roll back.
 
-Every error must be handled: propagated upward, logged, or converted into a more meaningful error. **Never** ignore it silently.
+```python
+# ❌ Fails open: an outage in the permission service grants access
+def can_edit(user, doc) -> bool:
+    try:
+        return permissions.check(user, doc, "edit")
+    except Exception:
+        return True
 
+# ✅ Fails closed; this function handles the error, so it logs it
+def can_edit(user, doc) -> bool:
+    try:
+        return permissions.check(user, doc, "edit")
+    except PermissionServiceError:
+        logger.exception("permission check failed for doc %s", doc.id)
+        return False
 ```
-// Pseudocode
-result = risky_operation()
-if error:
-    // You must do one of the following:
-    //   1. return error to caller (propagate)
-    //   2. log + return fallback (degrade)
-    //   3. panic/crash (when unrecoverable)
-```
-
-### Principle 2: Add context
-
-Error messages should include **the operation** and **the key parameters**, so whoever debugs the problem can locate it without reading the whole call chain.
-
-```
-// ❌ No context
-"failed"
-
-// ✅ With context
-"failed to process order #12345: payment gateway timeout after 30s"
-```
-
-### Principle 3: Use specific types
-
-Use error types to tell failure causes apart, so callers can handle each failure precisely.
-
-```
-// ❌ Generic error
-throw new Error("something went wrong")
-
-// ✅ Specific types
-throw new OrderNotFoundError(orderId)
-throw new PaymentTimeoutException(gatewayName, timeoutMs)
-```
-
-### Principle 4: Fail fast
-
-Validate preconditions before the operation starts and fail as early as possible. This avoids the inconsistent state left behind when an error surfaces halfway through.
-
-```
-// ❌ Finds the invalid argument halfway through
-def process(data, config):
-    result = expensive_computation(data)  # already spent 5 seconds
-    if not config.valid:
-        raise ValueError("invalid config")  # 5 seconds wasted
-
-// ✅ Validate first
-def process(data, config):
-    if not config.valid:
-        raise ValueError("invalid config")
-    result = expensive_computation(data)
-```
-
-### Principle 5: Handle each error once
-
-Don't handle the same error at every layer (logging it, returning it, and wrapping it). Pick one, and let the caller decide what to do with it.
-
-```
-// ❌ Logs and returns (handled twice)
-if err:
-    log.error("failed: %s", err)
-    return err
-
-// ✅ Only wrap and return; the top level handles it in one place
-if err:
-    return wrap_error("operation failed", err)
-```
-
----
 
 ## Anti-Patterns
 
-### Anti-pattern 1: Empty catch blocks
+- **Empty catch blocks**: Python `except: pass`, TypeScript `catch {}` and `promise.catch(() => {})`, Apex `catch (DmlException e) {}`, where the rest of the transaction commits and the failed records are lost.
+- **Overly broad catch**: `except Exception` in the middle of a module hides which failure happened; at a boundary that logs the traceback and fails closed it is correct.
+- **Losing the cause**: in TypeScript, `throw new ServiceError('IO failed')` inside `catch (err)` drops `err` unless `{ cause: err }` is passed. In Python the original stays in `__context__`; `from e` only marks it as the direct cause (B904, 🟢).
+- **Exceptions for expected outcomes**: a lookup that throws on "not found" forces callers into try/catch as if/else and makes them swallow real failures too; put the miss in the return type (`User | undefined`). Python EAFP (`try: d[k]` / `except KeyError:`) is idiomatic and not this anti-pattern.
+- **Jumps out of `finally`**: `return`, `break`, or `continue` in `finally` discards the in-flight exception (Python B012, a SyntaxWarning from 3.14; ESLint `no-unsafe-finally`).
+- **Ignored return values**: `fetch` resolves on HTTP 4xx and 5xx ([check `response.ok`](#typescript)), `re.match()` returns `None`, partial-success DML reports failures in `SaveResult`s ([Apex](#salesforce-apex)).
 
 ```python
-# ❌ Python: a bare except swallows every exception (including KeyboardInterrupt)
-try:
-    result = risky()
-except:
-    pass
-```
-
-```typescript
-// ❌ TypeScript: an empty catch hides the failure
-try {
-    await saveOrder(order);
-} catch {}
-
-// ❌ A promise chain that throws the rejection away
-saveOrder(order).catch(() => {});
-```
-
-```apex
-// ❌ Apex: the records stay unsaved, nobody is told, and the rest of the transaction commits
-try {
-    update accounts;
-} catch (DmlException e) {
-}
-```
-
-### Anti-pattern 2: Overly broad catch
-
-```python
-# ❌ Catches everything, so the failure types can't be told apart
-try:
-    result = risky()
-except Exception as e:
-    logger.error(f"failed: {e}")
-
-# ✅ Catch specific exceptions
-try:
-    result = risky()
-except ConnectionError as e:
-    logger.warning(f"network issue, retrying: {e}")
-    result = retry(risky)
-except ValueError as e:
-    logger.error(f"bad input: {e}")
-    raise
-```
-
-### Anti-pattern 3: Losing the original exception
-
-```python
-# ❌ The original exception is not recorded as the cause
-try:
-    result = external_api.call()
-except APIError as e:
-    raise RuntimeError("API failed")  # no "from e"
-
-# ✅ Keep the exception chain
-try:
-    result = external_api.call()
-except APIError as e:
-    raise RuntimeError("API failed") from e
-```
-
-```typescript
-// ❌ The original error is lost
-try {
-    await copyFile(source, destination);
-} catch (err) {
-    throw new ServiceError('IO failed');
-}
-
-// ✅ Keep the cause (ES2022 Error options)
-try {
-    await copyFile(source, destination);
-} catch (err) {
-    throw new ServiceError('IO failed', { cause: err });
-}
-```
-
-### Anti-pattern 4: Exceptions for control flow
-
-```python
-# ❌ Exceptions used for normal control flow (slow and unclear)
-try:
-    user = users[name]
-except KeyError:
-    user = create_default_user(name)
-
-# ✅ Explicit check
-user = users.get(name) or create_default_user(name)
-```
-
-```typescript
-// ❌ An expected "not found" is thrown, so callers write try/catch as an if/else
-//    (and the bare catch also swallows real failures, such as a lost connection)
-function resolveUser(id: string): User {
-    try {
-        return getUser(id); // throws when the id is unknown
-    } catch {
-        return createDefaultUser(id);
-    }
-}
-
-// ✅ Put the expected miss in the return type; keep exceptions for real failures
-function findUser(id: string): User | undefined {
-    return usersById.get(id);
-}
-
-const user = findUser(id) ?? createDefaultUser(id);
-```
-
-### Anti-pattern 5: Ignoring return values
-
-```python
-# ❌ str methods return a new string: the stripped copy is discarded
-name.strip()
-save(name)  # still has the surrounding whitespace
-
-# ✅ Use the return value
-name = name.strip()
-save(name)
-
 # ❌ re.match returns None when nothing matches
-user_id = re.match(r"user-(\d+)", key).group(1)  # AttributeError on None
+user_id = re.match(r"user-(\d+)", key).group(1)
 
 # ✅ Check the result
 match = re.match(r"user-(\d+)", key)
@@ -224,298 +86,133 @@ if match is None:
 user_id = match.group(1)
 ```
 
-```typescript
-// ❌ fetch resolves on HTTP 4xx/5xx; ignoring response.ok treats an error page as data
-const order = await (await fetch(url)).json();
-
-// ✅ Check the status before using the body
-const response = await fetch(url);
-if (!response.ok) {
-    throw new Error(`GET ${url} failed with HTTP ${response.status}`);
-}
-const order: unknown = await response.json();
-```
-
-```apex
-// ❌ allOrNone = false reports failures in the results instead of throwing; here they are dropped
-Database.update(records, false);
-
-// ✅ Keep the results and record which rows failed and why (results follow the input order)
-Map<Id, List<Database.Error>> errorsById = new Map<Id, List<Database.Error>>();
-List<Database.SaveResult> results = Database.update(records, false, AccessLevel.USER_MODE);
-for (Integer i = 0; i < results.size(); i++) {
-    if (!results[i].isSuccess()) {
-        errorsById.put(records[i].Id, results[i].getErrors());
-    }
-}
-```
-
----
-
 ## Error Hierarchy Design
 
-### Three-tier error architecture
-
-```
-┌────────────────────────────────────────────────────────────┐
-│ Application Errors                                         │
-│   - AppError / ServiceError                                │
-│   - Caught by the global exception handler, which returns  │
-│     a user-friendly response                               │
-├────────────────────────────────────────────────────────────┤
-│ Module Errors                                              │
-│   - PaymentError, AuthError, ValidationError               │
-│   - Each business module defines its own error types       │
-├────────────────────────────────────────────────────────────┤
-│ Infrastructure Errors                                      │
-│   - IOError, NetworkError, DatabaseError                   │
-│   - Low-level errors from the OS, network, and database    │
-└────────────────────────────────────────────────────────────┘
-```
-
-### Design rules
-
-1. **Module errors inherit from the application base class**, so they can be caught globally
-2. **Infrastructure errors are converted into module errors at the module boundary**, so they never leak to upper layers
-3. **Every error type carries enough context** for debugging (IDs, timestamp, operation name)
+1. Module errors inherit from one application base class, so the boundary handler catches them in one place.
+2. Infrastructure errors (I/O, network, database) are converted into module errors at the module boundary, with the cause attached.
+3. Each type carries the context needed to debug it (IDs, operation), not a copy of the log line.
 
 ### Example hierarchy (Python)
 
 ```python
 class AppError(Exception):
-    """Base application exception"""
-    pass
+    """Base class: the boundary handler catches AppError."""
+
 
 class PaymentError(AppError):
-    """Payment module error"""
     def __init__(self, order_id: str, reason: str):
+        super().__init__(order_id, reason)  # args keep every constructor argument, so it pickles
         self.order_id = order_id
-        super().__init__(f"payment failed for order {order_id}: {reason}")
+        self.reason = reason
 
-class PaymentGatewayTimeout(PaymentError):
-    """Payment gateway timed out"""
+    def __str__(self) -> str:
+        return f"payment failed for order {self.order_id}: {self.reason}"
+
+
+class PaymentGatewayTimeoutError(PaymentError):
     def __init__(self, order_id: str, gateway: str, timeout_ms: int):
+        super().__init__(order_id, f"gateway {gateway} timed out after {timeout_ms} ms")
+        self.args = (order_id, gateway, timeout_ms)  # match this constructor for pickling
         self.gateway = gateway
         self.timeout_ms = timeout_ms
-        super().__init__(order_id, f"gateway {gateway} timed out after {timeout_ms}ms")
 ```
+
+An `__init__` whose arguments differ from `args` fails to unpickle (`TypeError: missing 1 required positional argument`), so errors raised in `ProcessPoolExecutor`, `multiprocessing`, or Celery workers never reach the caller intact.
 
 ### Example hierarchy (TypeScript)
 
 ```typescript
-interface AppErrorOptions extends ErrorOptions {
-    code?: string;
-}
-
 class AppError extends Error {
-    readonly code: string | undefined;
+  readonly code: string | undefined;
 
-    constructor(message: string, { code, cause }: AppErrorOptions = {}) {
-        super(message, { cause }); // native ES2022 cause: loggers and debuggers follow the chain
-        this.name = new.target.name; // each subclass reports its own name
-        this.code = code;
-    }
-}
-
-class OrderNotFoundError extends AppError {
-    readonly orderId: string;
-
-    constructor(orderId: string) {
-        super(`order ${orderId} not found`, { code: 'ORDER_NOT_FOUND' });
-        this.orderId = orderId;
-    }
+  constructor(message: string, { code, cause }: ErrorOptions & { code?: string } = {}) {
+    super(message, { cause }); // native ES2022 cause: loggers follow the chain
+    this.name = new.target.name; // each subclass reports its own name
+    this.code = code;
+  }
 }
 
 class PaymentGatewayError extends AppError {
-    readonly gateway: string;
+  readonly gateway: string;
 
-    constructor(gateway: string, cause: unknown) {
-        super(`payment gateway ${gateway} failed`, { code: 'PAYMENT_GATEWAY_FAILED', cause });
-        this.gateway = gateway;
-    }
+  constructor(gateway: string, cause: unknown) {
+    super(`payment gateway ${gateway} failed`, { code: 'PAYMENT_GATEWAY_FAILED', cause });
+    this.gateway = gateway;
+  }
 }
 ```
 
----
-
 ## Logging Best Practices
 
-### Choosing a log level
-
-| Level | When to use | Examples |
-|------|---------|------|
-| **ERROR** | Failures that need human intervention | Payment failure, data inconsistency |
-| **WARN** | Problems that recover automatically | Retry succeeded, degraded fallback |
-| **INFO** | Normal business events | Order created, user logged in |
-| **DEBUG** | Debugging details | Function arguments, intermediate state |
-
-### Log format
-
-```
-// ❌ No structured information
-log.error("failed to process")
-
-// ✅ Structured fields + context
-log.error("payment_failed", {
-    "order_id": "12345",
-    "gateway": "stripe",
-    "error_code": "card_declined",
-    "amount": 99.99,
-    "duration_ms": 2340
-})
-```
-
-### Log security
-
-- **Never log sensitive data**: passwords, tokens, PII, full credit card numbers
-- **Mask values**: `email: a***@example.com`
-- **Prevent log injection**: escape user input so it cannot forge log lines
-
----
+- Levels: ERROR needs a human, WARN recovered on its own (retry succeeded, fallback ran), INFO records business events, DEBUG holds details.
+- Structured fields (`order_id`, `gateway`, `duration_ms`) plus the stack: `logger.exception("…")` in Python, `logger.error({ err }, '…')` with pino-style loggers. What stays out: [Secure Logging](../security-review-guide.md#secure-logging).
 
 ## Code Examples by Language
 
 ### Python
 
 ```python
-# ✅ Specific exceptions + context + exception chaining
-try:
-    response = http_client.post(url, data=payload)
-    response.raise_for_status()
-except requests.ConnectionError as e:
-    raise PaymentGatewayError(f"cannot reach {gateway_name}") from e
-except requests.HTTPError as e:
-    if response.status_code == 429:
-        raise RateLimitError(f"rate limited by {gateway_name}") from e
-    raise PaymentGatewayError(f"HTTP {response.status_code} from {gateway_name}") from e
+# ✅ Timeouts and HTTP errors become module errors at the boundary, with the cause kept
+def charge(session: requests.Session, url: str, payload: dict, gateway: str) -> dict:
+    try:
+        response = session.post(url, json=payload, timeout=(3.05, 10))  # connect, read (seconds)
+        response.raise_for_status()
+        return response.json()
+    except requests.HTTPError as e:
+        if e.response.status_code == 429:
+            raise RateLimitError(gateway) from e
+        raise PaymentGatewayError(gateway, f"HTTP {e.response.status_code}") from e
+    except requests.Timeout as e:  # ConnectTimeout and ReadTimeout
+        raise PaymentGatewayError(gateway, "timed out") from e
+    except requests.RequestException as e:  # connection errors, invalid JSON, ...
+        raise PaymentGatewayError(gateway, type(e).__name__) from e
 ```
 
-> 📖 Depth: [Python exception handling](../python.md#exception-handling)
+`requests` has no default timeout, and `ReadTimeout` is not a `ConnectionError`: catching only `ConnectionError` lets read timeouts escape unconverted.
 
 ### TypeScript
 
 ```typescript
-// ✅ Custom error class + context + native cause
-class PaymentError extends Error {
-    constructor(
-        message: string,
-        public readonly orderId: string,
-        public readonly gateway: string,
-        cause?: unknown,
-    ) {
-        super(message, { cause }); // native ES2022 Error.cause instead of a field that shadows it
-        this.name = 'PaymentError';
-    }
-}
-
-async function processPayment(orderId: string): Promise<Receipt> {
-    try {
-        const response = await fetch(url, { method: 'POST', body: payload });
-        if (!response.ok) {
-            throw new PaymentError(
-                `gateway returned ${response.status}`,
-                orderId,
-                gatewayName,
-            );
-        }
-        return await response.json();
-    } catch (err) {
-        if (err instanceof TypeError) {
-            throw new PaymentError('gateway unreachable', orderId, gatewayName, err);
-        }
-        throw err;
-    }
+// ✅ fetch rejects on network failures and timeouts; HTTP errors resolve, so check them too
+async function processPayment(url: string, payload: string, gateway: string): Promise<Receipt> {
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'POST', body: payload, signal: AbortSignal.timeout(10_000) });
+  } catch (err) {
+    throw new PaymentGatewayError(gateway, err);
+  }
+  if (!response.ok) throw new PaymentGatewayError(gateway, new Error(`HTTP ${response.status}`));
+  return parseReceipt(await response.json());
 }
 ```
 
-> 📖 Depth: [Throw Error objects and keep the cause](../javascript.md#throw-error-objects-and-keep-the-cause) · [Node.js async error handling](../nodejs.md#async-error-handling) · [NestJS error handling](../nestjs.md#error-handling)
+More: [Throw Error objects and keep the cause](../javascript.md#throw-error-objects-and-keep-the-cause) · [Node.js async errors](../nodejs.md#async-error-handling) · [NestJS error handling](../nestjs.md#error-handling).
 
 ### Salesforce Apex
 
-Apex rolls back only the failed DML statement when an exception is caught, and the rest of the transaction still commits, so a swallowed exception quietly loses data. Uncaught exceptions roll back the whole transaction.
+A caught exception rolls back only the failed DML statement while the rest of the transaction commits, so swallowing it silently loses data; an uncaught one rolls back everything.
 
 ```apex
-public with sharing class InvoiceService {
-    public class InvoiceException extends Exception {}
-
-    // ❌ The failure disappears: the caller believes the invoices were saved
-    public static void createSilently(List<Invoice__c> invoices) {
-        try {
-            insert invoices;
-        } catch (DmlException e) {
-        }
-    }
-
-    // ✅ Partial success in user mode: inspect every SaveResult and report the failures
-    public static List<String> create(List<Invoice__c> invoices) {
-        List<String> failures = new List<String>();
-        List<Database.SaveResult> results = Database.insert(invoices, false, AccessLevel.USER_MODE);
-        for (Integer i = 0; i < results.size(); i++) {
-            for (Database.Error err : results[i].getErrors()) {
-                failures.add('Row ' + i + ': ' + err.getStatusCode() + ': ' + err.getMessage());
-            }
-        }
-        return failures;
-    }
-
-    // submit(Id invoiceId) throws InvoiceException when the invoice cannot be submitted
-}
-
-public with sharing class InvoiceTriggerHandler {
-    // ✅ Trigger validation: addError() fails the record with a message for the user
-    //    instead of throwing (pass Trigger.new from a before insert/update trigger)
-    public static void validate(List<Invoice__c> newInvoices) {
-        for (Invoice__c inv : newInvoices) {
-            if (inv.Amount__c == null || inv.Amount__c < 0) {
-                inv.Amount__c.addError('Amount must be zero or greater.');
-            }
-        }
+// ✅ Partial success in user mode: every failed row is reported
+List<Database.SaveResult> results = Database.insert(invoices, false, AccessLevel.USER_MODE);
+for (Integer i = 0; i < results.size(); i++) {
+    for (Database.Error err : results[i].getErrors()) {
+        failures.add('Row ' + i + ': ' + err.getStatusCode() + ': ' + err.getMessage());
     }
 }
 
-public with sharing class InvoiceController {
-    // ✅ LWC boundary: keep the details in the server log, send the client a user-safe message
-    @AuraEnabled
-    public static void submitInvoice(Id invoiceId) {
-        try {
-            InvoiceService.submit(invoiceId);
-        } catch (InvoiceService.InvoiceException e) {
-            // log e.getMessage() and e.getStackTraceString() with the project's logger here
-            throw new AuraHandledException('The invoice could not be submitted. Please try again.');
-        }
-    }
+// ✅ LWC boundary: log the details on the server, send the client a safe message
+try {
+    InvoiceService.submit(invoiceId);
+} catch (InvoiceService.InvoiceException e) {
+    // log e.getMessage() and e.getStackTraceString() with the project's logger
+    throw new AuraHandledException('The invoice could not be submitted. Please try again.');
 }
-
-// ⚠️ System.LimitException cannot be caught: no catch block survives a governor-limit breach,
-//    and the transaction rolls back. Fix the design (bulkify, move work to async Apex).
 ```
 
-Static analysis: PMD `EmptyCatchBlock`.
+Trigger validation uses `record.Field__c.addError('…')` instead of throwing; `System.LimitException` can't be caught, so fix the design. PMD: `EmptyCatchBlock`. More: [Apex transactions](../salesforce/apex.md#transactions--error-handling) · [Flow fault handling](../salesforce/flows.md#fault-handling).
 
-> 📖 Depth: [Apex transactions and error handling](../salesforce/apex.md#transactions--error-handling) · [The LWC-Apex contract](../salesforce/lwc.md#the-lwc-apex-contract) · [Flow fault handling](../salesforce/flows.md#fault-handling)
+## References
 
----
-
-## Review Checklist
-
-### Core checks
-- [ ] No empty catch blocks or silently ignored errors
-- [ ] Error messages include the operation and the key parameters
-- [ ] Specific error types are used (not a generic Error/Exception)
-- [ ] The exception chain is preserved (`raise ... from`, `{ cause }`)
-- [ ] Preconditions are validated before the operation starts (fail fast)
-
-### Architecture checks
-- [ ] A clear error hierarchy is defined (application / module / infrastructure)
-- [ ] A global exception handler catches unhandled errors
-- [ ] API boundaries convert internal errors into the appropriate HTTP status codes
-
-### Logging checks
-- [ ] Error logs include structured context
-- [ ] No sensitive data is logged (passwords, tokens, PII)
-- [ ] Log levels are used correctly (ERROR vs WARN vs INFO)
-
-### Language-specific
-- [ ] Python: catch specific exceptions; use `from` to keep the chain
-- [ ] TypeScript: no floating promises; errors are wrapped with `{ cause }`; typed `Error` subclasses are thrown, never strings or plain objects
-- [ ] Apex: no empty catch blocks; `SaveResult` is inspected after partial-success DML; `AuraHandledException` with a user-safe message at the LWC boundary
+- [OWASP Top 10:2025 A10 Mishandling of Exceptional Conditions](https://owasp.org/Top10/2025/A10_2025-Mishandling_of_Exceptional_Conditions/)
+- [MDN: Error cause](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/cause)

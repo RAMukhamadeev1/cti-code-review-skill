@@ -1,136 +1,123 @@
 # Code Review Best Practices
 
-Comprehensive guidelines for conducting effective code reviews.
+For human reviewers and teams: review standards, mentoring, communication, and team process. An AI review does not need this guide; its process and output format are in [SKILL.md](../SKILL.md).
 
-## Review Philosophy
+## Review Mindset
 
-### Goals of Code Review
+**Goals of code review:**
 
-**Primary Goals:**
 - Catch bugs and edge cases before production
-- Ensure code maintainability and readability
-- Share knowledge across the team
-- Enforce coding standards consistently
-- Improve design and architecture decisions
-
-**Secondary Goals:**
-- Mentor junior developers
+- Keep the code maintainable and readable
+- Share knowledge across the team, and mentor newer developers
+- Apply the team's coding standards consistently
+- Improve design and architecture decisions, and record them in the discussion
 - Build team culture and trust
-- Document design decisions through discussions
 
-### What Code Review is NOT
+**Not the goals:**
 
-- A gatekeeping mechanism to block progress
-- An opportunity to show off knowledge
-- A place to nitpick formatting (use linters)
-- A way to rewrite code to personal preference
+- Showing off knowledge
+- Nitpicking formatting (linters and formatters do that)
+- Blocking progress without a concrete reason
+- Rewriting the code to your personal preference
 
-## Review Timing
+## Giving Feedback
 
-### When to Review
+Good feedback is:
+
+- Specific and actionable: point at the line, name the input or state that breaks it, and suggest a fix
+- Educational, not judgmental, and about the code, not the person
+- Balanced: say what works, specifically, rather than by formula
+- Prioritized with a severity label, so the author knows what blocks the merge
+
+```markdown
+❌ Bad: "This is wrong."
+✅ Good: "Two concurrent requests can both pass the balance check on line 42 and both
+         debit the account. A conditional UPDATE (`... WHERE balance >= :amount`)
+         makes the check and the write one atomic step."
+
+❌ Bad: "Why didn't you use X pattern?"
+✅ Good: "This query is built inline in three handlers. A small repository function
+         would let the tests stub it; `OrderRepository` in this codebase is an example."
+
+❌ Bad: "Rename this variable."
+✅ Good: "🟢 [nit] Consider `userCount` instead of `uc` for clarity. Not blocking
+         if you prefer to keep it."
+```
+
+### Ask when you're unsure, state what you've verified
+
+A question invites the author to explain context you may lack. It is the right tool when you are genuinely unsure:
+
+```markdown
+❌ "You need error handling here."
+✅ "How should this behave if the API call fails?"
+
+❌ "This will fail if the list is empty."   (when you haven't checked)
+✅ "What happens if `items` is an empty array?"
+```
+
+When you have verified a defect, a question hides it. State it plainly, with the evidence and a fix: "`items[0]` throws when the search returns no results; return early when `items` is empty."
+
+### Suggest, don't command
+
+For preferences and alternative designs, use collaborative language and label the comment as a suggestion:
+
+```markdown
+❌ "You must change this to use async/await"
+✅ "💡 [suggestion] async/await might make this more readable. What do you think?"
+
+❌ "Extract this into a function"
+✅ "This logic appears in 3 places. Would it make sense to extract it?"
+```
+
+Keep 🔴 `[blocking]` comments direct: say what breaks and what would fix it. Collaborative phrasing is for choices, not for defects.
+
+## Severity Labels
+
+Start every comment with a tier:
+
+| Label | Meaning | Typical findings |
+|---|---|---|
+| 🔴 `[blocking]` | Must fix before merge | Exploitable security vulnerabilities; data loss or corruption; breaking changes without a migration; failures at realistic volume, including Salesforce governor-limit breaches; swallowed errors that hide data loss |
+| 🟡 `[important]` | Should fix; discuss if you disagree | Missing error handling; no tests for new behavior; performance that degrades as data grows; duplicated logic that must stay in sync; names that mislead about behavior |
+| 🟢 `[nit]` | Optional | Naming and style the linter doesn't cover; minor optimizations; extra test cases; documentation touch-ups |
+| 💡 `[suggestion]` | An alternative worth considering | A simpler design; a library the codebase already uses |
+
+Salesforce findings take their default tier from [Severity Calibration](salesforce/platform.md#severity-calibration). Mark a comment that needs no action "FYI, no action needed", so the author doesn't treat it as a request.
+
+## Team Process
+
+### Review timing
+
+Suggested team norms:
 
 | Trigger | Action |
-|---------|--------|
-| PR opened | Review within 24 hours, ideally same day |
-| Changes requested | Re-review within 4 hours |
-| Blocking issue found | Communicate immediately |
+|---|---|
+| PR opened | First review within one business day, ideally the same day |
+| Changes requested | Re-review promptly once the author responds |
+| Blocking issue found | Tell the author right away instead of waiting to finish the review |
 
-### Time Allocation
+### Review depth
 
-- **Small PR (<100 lines)**: 10-15 minutes
-- **Medium PR (100-400 lines)**: 20-40 minutes
-- **Large PR (>400 lines)**: Request to split, or 60+ minutes
+- **Skim:** the description, linked issue, CI status, and the list of changed files; decide whether a deeper review is needed.
+- **Standard:** a full walkthrough of the logic, tests, and security-sensitive code.
+- **Deep:** architecture, performance, a security audit, and edge-case exploration, for risky or cross-cutting changes.
 
-## Review Depth Levels
+Scale the depth with risk, not only with size. When a PR is too large to review well, ask the author to split it along reviewable boundaries (a refactor separate from the behavior change), or walk through it together.
 
-### Level 1: Skim Review (5 minutes)
-- Check PR description and linked issues
-- Verify CI/CD status
-- Look at file changes overview
-- Identify if deeper review needed
+### Handling disagreements
 
-### Level 2: Standard Review (20-30 minutes)
-- Full code walkthrough
-- Logic verification
-- Test coverage check
-- Security scan
+1. **Seek to understand**: ask clarifying questions
+2. **Acknowledge valid points**: show you've considered their perspective
+3. **Provide data**: benchmarks, documentation, or examples
+4. **Escalate if needed**: involve a senior developer or an architect
+5. **Know when to let go**: not every hill is worth dying on
 
-### Level 3: Deep Review (60+ minutes)
-- Architecture evaluation
-- Performance analysis
-- Security audit
-- Edge case exploration
+### Anti-patterns
 
-## Communication Guidelines
+- **Reviewer:** rubber stamping (approving without reviewing); bike-shedding (debating trivial details at length); scope creep ("while you're at it, can you also..."); ghosting (requesting changes, then disappearing); perfectionism (blocking on style preferences).
+- **Author:** mega PRs; no context (a missing description or linked issue); defensive responses to every comment; silent updates (changing code without replying to the comments).
 
-### Tone and Language
+### Metrics and improvement
 
-**Use collaborative language:**
-- "What do you think about..." instead of "You should..."
-- "Could we consider..." instead of "This is wrong"
-- "I'm curious about..." instead of "Why didn't you..."
-
-**Be specific and actionable:**
-- Include code examples when suggesting changes
-- Link to documentation or past discussions
-- Explain the "why" behind suggestions
-
-### Handling Disagreements
-
-1. **Seek to understand**: Ask clarifying questions
-2. **Acknowledge valid points**: Show you've considered their perspective
-3. **Provide data**: Use benchmarks, docs, or examples
-4. **Escalate if needed**: Involve senior dev or architect
-5. **Know when to let go**: Not every hill is worth dying on
-
-## Review Prioritization
-
-### Must Fix (Blocking)
-- Security vulnerabilities
-- Data corruption risks
-- Breaking changes without migration
-- Critical performance issues
-- Missing error handling for user-facing features
-
-### Should Fix (Important)
-- Test coverage gaps
-- Moderate performance concerns
-- Code duplication
-- Unclear naming or structure
-- Missing documentation for complex logic
-
-### Nice to Have (Non-blocking)
-- Style preferences beyond linting
-- Minor optimizations
-- Additional test cases
-- Documentation improvements
-
-## Anti-Patterns to Avoid
-
-### Reviewer Anti-Patterns
-- **Rubber stamping**: Approving without actually reviewing
-- **Bike shedding**: Debating trivial details extensively
-- **Scope creep**: "While you're at it, can you also..."
-- **Ghosting**: Requesting changes then disappearing
-- **Perfectionism**: Blocking for minor style preferences
-
-### Author Anti-Patterns
-- **Mega PRs**: Submitting 1000+ line changes
-- **No context**: Missing PR description or linked issues
-- **Defensive responses**: Arguing every suggestion
-- **Silent updates**: Making changes without responding to comments
-
-## Metrics and Improvement
-
-### Track These Metrics
-- Time to first review
-- Review cycle time
-- Number of review rounds
-- Defect escape rate
-- Review coverage percentage
-
-### Continuous Improvement
-- Hold retrospectives on review process
-- Share learnings from escaped bugs
-- Update checklists based on common issues
-- Celebrate good reviews and catches
+Track time to first review, review cycle time, the number of review rounds, the defect escape rate, and review coverage. Hold retrospectives on the process, share lessons from escaped bugs, update checklists from recurring issues, and recognize good reviews and catches.

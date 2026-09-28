@@ -1,50 +1,53 @@
 # Aura Components Code Review Guide
 
-Review guidance for Aura bundles (`.cmp`, `.app`, `.evt`, `.design`, and their `Controller.js`, `Helper.js`, and `Renderer.js` files) and the Apex they call. Aura is still supported, but new UI belongs in LWC, so most findings here keep existing components safe until they migrate.
+Review rules for Aura bundles (`.cmp`, `.app`, `.evt`, `.design`, and their `Controller.js`, `Helper.js`, and `Renderer.js` files) and the Apex they call. Aura is still supported, but new UI belongs in LWC, so most findings here keep existing components safe until they migrate. Controller, helper, and renderer files also load the [JavaScript Guide](../javascript.md). The Apex named in `controller="..."` follows [The LWC-Apex Contract](lwc.md#the-lwc-apex-contract).
 
-> Load the [Salesforce Platform Guide](platform.md) first — it defines governor limits, the security model and API-version rules, and severity calibration.
->
-> 📖 General JavaScript rules (language semantics, async and Promise pitfalls, DOM safety, test basics) live in the [JavaScript Guide](../javascript.md); this guide covers Aura-specific behavior only.
->
-> Related: [LWC-Apex contract](lwc.md#the-lwc-apex-contract) (applies to Aura server actions too) · [LWC security](lwc.md#security-in-the-browser)
+> Load [platform.md](platform.md) first. Related: [LWC](lwc.md) · [Security in the Browser](lwc.md#security-in-the-browser)
 
-## Table of Contents
+## Review Checklist
 
-- [When to Use This Guide](#when-to-use-this-guide)
-- [Aura Today](#aura-today)
-- [Server Actions](#server-actions)
-- [Events & Communication](#events--communication)
-- [Rendering & Performance](#rendering--performance)
-- [Security](#security)
-- [Code Organization](#code-organization)
-- [Testing](#testing)
-- [Review Checklist](#review-checklist)
-- [References](#references)
+Read this checklist first; open a section only when the diff contains its pattern.
+Pre-existing code is a finding only when the change makes it worse; fixes and small changes to existing Aura components don't justify demanding a rewrite. Take default tiers from the [severity table](platform.md#severity-calibration).
+
+### New UI & migration → [Migration to LWC](#migration-to-lwc)
+
+- [ ] A new `aura/` bundle documents the gap LWC can't fill (without that, 🟡 [important]); Aura stays at most a thin wrapper where a container still requires it
+- [ ] Migration moves leaf components to LWC and embeds them in the Aura parent, never the reverse
+
+### Server actions → [Server Actions](#server-actions)
+
+- [ ] Every callback handles `SUCCESS`, `ERROR`, and `INCOMPLETE`, and clears loading state
+- [ ] Code in timers, promises, and library callbacks is wrapped in `$A.getCallback()` and checks `component.isValid()`
+- [ ] Callbacks of cacheable (storable) actions are safe to run twice; a view loads with one action, and slow actions use `setBackground()`
+
+### Events → [Events & Communication](#events--communication)
+
+- [ ] Component events carry parent-child communication, application events only app-wide signals, and Lightning Message Service reaches LWC or Visualforce
+- [ ] Parents call children through `aura:method`; every fired event is registered with `<aura:registerEvent>`; a `destroy` handler removes window listeners and timers
+
+### Rendering → [Rendering & Performance](#rendering--performance)
+
+- [ ] `aura:if` and CSS toggling are chosen deliberately, and neither is treated as access control
+- [ ] Large lists page through Apex or `lightning:datatable` infinite loading
+- [ ] DOM work runs after rendering (a `render` event handler, or a renderer that calls its super methods), never in `init` or another controller action
+
+### Security → [Security](#security)
+
+- [ ] No `aura:unescapedHtml` or renderer `innerHTML` with record data or URL parameters
+- [ ] No `force:navigateToURL` with a URL from page state, a record field, or an attribute the caller sets
+- [ ] Access checks in markup are mirrored in Apex; custom controllers enforce sharing and CRUD/FLS; LDS forms are used where they fit
+
+### Code organization & tests → [Code Organization](#code-organization) · [Testing](#testing)
+
+- [ ] Controllers delegate to helpers, and no per-instance state lives on the shared helper
+- [ ] Attributes have specific types and defaults, and `.design` attributes are bounded and still validated in code
+- [ ] Business rules live in Apex or migrated LWC, where tests run; when the repo lints Aura as ES5, no ES6+ syntax is requested
 
 ---
 
-## When to Use This Guide
+## Migration to LWC
 
-| Code under review | Load |
-|---|---|
-| `aura/<bundle>/*.cmp`, `*.app`, `*.evt`, `*.design` | This guide |
-| `aura/<bundle>/*Controller.js`, `*Helper.js`, `*Renderer.js` | This guide + the [JavaScript Guide](../javascript.md) |
-| The Apex class named in `controller="..."` | [The LWC-Apex Contract](lwc.md#the-lwc-apex-contract) + the [Apex Guide](apex.md) |
-| An LWC that is embedded in, or replaces, an Aura component | The [LWC Guide](lwc.md) + [Aura Today](#aura-today) |
-
-The Salesforce Aura lint config parses controller, helper, and renderer files as ES5 scripts (`ecmaVersion: 5`) and enables `vars-on-top`, so the examples here use `var` and function expressions. Where a project lints Aura with it, don't ask for `const`, arrow functions, or `async`/`await` in Aura files; that part of the JavaScript Guide applies to LWC.
-
----
-
-## Aura Today
-
-### Build new UI in LWC
-
-Lightning Web Components are the recommended model for new UI. Treat a new `aura/` bundle as an important (🟡) finding unless the change documents the gap LWC can't fill ([Severity Calibration](platform.md#severity-calibration)): the same panel belongs in an LWC with a `lightning__RecordPage` target, with Aura at most as a thin wrapper where a container still requires it. Fixes and small changes to existing Aura components are fine and don't justify demanding a rewrite.
-
-### Migrate in slices: LWC inside Aura, never the reverse
-
-An Aura component can contain an LWC, but an LWC can't contain an Aura component, so migrate leaf components first and embed them in the existing Aura parent. Data goes down through attributes and events come back through `on<event>` handlers; Lightning Message Service connects unrelated Aura, LWC, and Visualforce components during the move.
+Lightning Web Components are the recommended model for new UI. A new `aura/` bundle is a 🟡 [important] finding unless the change documents the gap LWC can't fill; the same panel belongs in an LWC with a `lightning__RecordPage` target. An Aura component can contain an LWC, but an LWC can't contain an Aura component. So migrate leaf components first and embed them in the existing Aura parent: data goes down through attributes, and events come back through `on<event>` handlers. Lightning Message Service connects unrelated Aura, LWC, and Visualforce components during the move.
 
 ```html
 <!-- ❌ In an LWC template: <c-legacy-invoice-panel> is an Aura component, which LWC can't contain -->
@@ -60,38 +63,25 @@ An Aura component can contain an LWC, but an LWC can't contain an Aura component
 
 ## Server Actions
 
-A server action calls an `@AuraEnabled` Apex method; the method's own rules (cacheable reads, server-side access checks, `AuraHandledException`) are in [The LWC-Apex Contract](lwc.md#the-lwc-apex-contract).
+A server action calls an `@AuraEnabled` Apex method. The method's own rules (cacheable reads, server-side access checks, `AuraHandledException`) are in [The LWC-Apex Contract](lwc.md#the-lwc-apex-contract).
 
 ### Handle SUCCESS, ERROR, and INCOMPLETE in every callback
 
-`ERROR` carries the server's errors, and `INCOMPLETE` means the server was unreachable (offline or timed out).
+`ERROR` carries the server's errors, and `INCOMPLETE` means the server was unreachable (offline or timed out). Route every callback through one helper that clears the loading state. `helper.loadInvoices`, used in later examples, enqueues `c.getOpenInvoices` the way `loadAgingReport` does [below](#batch-related-calls-and-send-slow-ones-in-the-background).
 
 ```javascript
-// invoiceListHelper.js
-// ❌ A callback that only reads response.getReturnValue(): an error or a dropped connection
+// ❌ A callback that reads only response.getReturnValue(): an error or a dropped connection
 //    leaves the spinner running and the user uninformed
 
-// ✅ Every state handled in one helper; setCallback(this, ...) keeps the helper as `this`
-loadInvoices: function (component) {
-    var action = component.get('c.getOpenInvoices');
-    action.setParams({ accountId: component.get('v.recordId') });
-    action.setCallback(this, function (response) {
-        this.applyResponse(component, response, 'v.invoices');
-    });
-    component.set('v.isLoading', true);
-    $A.enqueueAction(action);
-},
-
+// ✅ invoiceListHelper.js: callbacks call this.applyResponse (setCallback(this, ...) keeps the helper as `this`)
 applyResponse: function (component, response, attributeName) {
     var state = response.getState();
     var errors = response.getError();
     component.set('v.isLoading', false);
     if (state === 'SUCCESS') {
         component.set(attributeName, response.getReturnValue());
-        component.set('v.errorMessage', null);
     } else if (state === 'ERROR') {
-        component.set('v.errorMessage', errors && errors[0] && errors[0].message
-            ? errors[0].message : $A.get('$Label.c.Invoice_Load_Failed'));
+        component.set('v.errorMessage', (errors && errors[0] && errors[0].message) || $A.get('$Label.c.Invoice_Load_Failed'));
     } else if (state === 'INCOMPLETE') {
         component.set('v.errorMessage', $A.get('$Label.c.Invoice_Offline'));
     }
@@ -100,7 +90,7 @@ applyResponse: function (component, response, attributeName) {
 
 ### Wrap code outside the Aura lifecycle in `$A.getCallback()`
 
-Timer, promise, and third-party library callbacks run outside the framework: attribute changes are not rendered and enqueued actions are not sent. `$A.getCallback()` brings the code back into the lifecycle, and `component.isValid()` returns `false` once the user has navigated away and the component was destroyed.
+Timer, promise, and third-party library callbacks run outside the framework, so their attribute changes aren't rendered and their enqueued actions aren't sent. `$A.getCallback()` brings the code back into the lifecycle. `component.isValid()` returns `false` once the user has navigated away and the component was destroyed.
 
 ```javascript
 // ❌ window.setTimeout(function () { helper.loadInvoices(component); }, 5000): the refresh runs
@@ -118,7 +108,7 @@ scheduleRefresh: function (component, event, helper) {
 
 ### Expect storable actions to call back twice
 
-For components at API 44.0 or later, `@AuraEnabled(cacheable=true)` on the Apex method makes the action storable (older components call `action.setStorable()`). The framework can call the callback first with cached data, then again with fresh data if it changed, so callbacks must be safe to run twice, and cacheable methods must not write.
+For components at API 44.0 or later, `@AuraEnabled(cacheable=true)` on the Apex method makes the action storable; older components call `action.setStorable()`. The framework can call the callback first with cached data, then again with fresh data if it changed. So callbacks must be safe to run twice, and cacheable methods must not write.
 
 ```javascript
 // ❌ Appends: when the callback runs twice (cached, then fresh), every row appears twice
@@ -153,7 +143,7 @@ loadAgingReport: function (component) {
 
 ### Prefer component events to application events
 
-A component event travels only to the containers above its source, so its reach is visible in the markup. An application event is a broadcast that every handler in the app receives; keep it for truly app-wide signals, and use Lightning Message Service to reach LWC or Visualforce.
+A component event travels only to the containers above its source, so its reach is visible in the markup. An application event is a broadcast that every handler in the app receives. Keep application events for truly app-wide signals, and use Lightning Message Service to reach LWC or Visualforce.
 
 ```javascript
 // ❌ $A.get('e.c:invoiceSelectedApp') for a parent-child conversation: every handler in the app receives it
@@ -224,16 +214,16 @@ handleDestroy: function (component) {
 </div>
 ```
 
-### Use unbound expressions for values that don't change
+### Use unbound expressions only for values fixed at creation
 
-A bound expression (`{!v.x}`) registers change handlers, and passing one to a child creates two-way binding: the child can silently change the parent's attribute. An unbound expression (`{#v.x}`) is evaluated once and passes a value.
+A bound expression (`{!v.x}`) is the default, and it is correct. It registers change handlers, and passed to a child it creates two-way binding, so the child can change the parent's attribute. An unbound expression (`{#v.x}`) is evaluated once, when the child is created, and later changes never reach it. Switching to unbound is a 💡 [suggestion] only for values fixed at creation, such as a label. A value that arrives later, from a server callback or async init, must stay bound. Don't flag bound expressions.
 
 ```html
-<!-- ❌ Two-way bindings for values the child only displays -->
-<c:invoiceHeader title="{!v.title}" currencyCode="{!v.currencyCode}" invoice="{!v.invoice}"/>
+<!-- ✅ Bound (the default): the child follows the invoice when a server callback sets it -->
+<c:invoiceHeader invoice="{!v.invoice}"/>
 
-<!-- ✅ One-time values unbound; a bound expression only where the child must follow changes -->
-<c:invoiceHeader title="{#v.title}" currencyCode="{#v.currencyCode}" invoice="{!v.invoice}"/>
+<!-- ✅ Unbound for a label fixed at creation; a value set later would never reach the child -->
+<c:invoiceHeader title="{#$Label.c.Invoice_Header}" invoice="{!v.invoice}"/>
 ```
 
 ### Page large `aura:iteration` lists
@@ -251,26 +241,26 @@ Every iterated item creates components and bindings, so rendering thousands of r
     enableInfiniteLoading="{!v.hasMore}" onloadmore="{!c.handleLoadMore}"/>
 ```
 
-### Touch the DOM only in renderers
+### Touch the DOM only after rendering
 
-Controllers run before the element exists or before the next rerender overwrites their changes. DOM work belongs in a renderer's `afterRender` and `rerender` (calling the super method first), and cleanup in `unrender`.
+`init` and other controller actions can run before the element exists, and the next rerender can overwrite their changes. DOM work belongs after rendering:
+
+- in a `render` event handler (`<aura:handler name="render" value="{!this}" action="{!c.handleRender}"/>`), which the Aura docs prefer to a custom renderer. It fires after every render and rerender, so put one-time work behind a flag.
+- or in a renderer's `afterRender` and `rerender`, each calling its super method first.
+
+Clean up in the renderer's `unrender` or in a `destroy` handler.
 
 ```javascript
-// ❌ In invoiceChartController.js: component.find('chart').getElement().style.height = '300px';
+// ❌ In invoiceChartController.js init: component.find('chart').getElement().style.height = '300px';
 //    the element may not exist yet, and the next rerender undoes the change
 
-// ✅ invoiceChartRenderer.js
-// eslint-disable-next-line no-unused-expressions
-({
-    afterRender: function (component, helper) {
-        this.superAfterRender();
+// ✅ A render handler; chartDrawn is a private Boolean attribute, so the next render event skips the drawing
+handleRender: function (component, event, helper) {
+    if (!component.get('v.chartDrawn')) {
+        component.set('v.chartDrawn', true);
         helper.drawChart(component);
-    },
-    unrender: function (component, helper) {
-        this.superUnrender();
-        helper.destroyChart(component);
     }
-});
+}
 ```
 
 ---
@@ -279,7 +269,7 @@ Controllers run before the element exists or before the next rerender overwrites
 
 ### Never render user data with `aura:unescapedHtml` or `innerHTML`
 
-Expressions in markup are escaped. `aura:unescapedHtml`, or `innerHTML` in a renderer, turns record text and URL parameters into live markup: stored or reflected XSS ([XSS Prevention](../cross-cutting/xss-prevention.md#salesforce-lwc-aura-visualforce)).
+Expressions in markup are escaped. `aura:unescapedHtml`, or `innerHTML` in a renderer, turns record text and URL parameters into live markup: stored or reflected XSS. The severity is in the XSS escape hatch row of the [severity table](platform.md#severity-calibration).
 
 ```html
 <!-- ❌ Stored XSS: record text rendered as markup -->
@@ -290,51 +280,26 @@ Expressions in markup are escaped. `aura:unescapedHtml`, or `innerHTML` in a ren
 <lightning:formattedRichText value="{!v.invoice.Notes__c}"/>
 ```
 
-### Treat Locker and Lightning Web Security as isolation, not authorization
+### Mirror markup checks in Apex, and let LDS enforce access where it fits
 
-Aura runs under Lightning Locker unless the org has turned on Lightning Web Security for Aura (beta in Spring '23, GA in Summer '23; automatic enablement for existing production orgs has been postponed), so Aura code must work under both. Either one isolates namespaces in the browser; neither stops a user from calling the Apex behind the component ([Treat Lightning Web Security as isolation](lwc.md#security-in-the-browser)).
+A check in markup only shapes the UI: any user with access to the Apex class can call the method directly. Lightning Locker and Lightning Web Security isolate namespaces in the browser, but neither authorizes anything; which one runs, and what it covers, is in [Security in the Browser](lwc.md#security-in-the-browser). `lightning:recordForm`, `lightning:recordEditForm`, `lightning:recordViewForm`, and `force:recordData` enforce CRUD, FLS, and sharing for the running user. A custom Apex controller gets none of that: its methods enforce access themselves ([The LWC-Apex Contract](lwc.md#the-lwc-apex-contract)), judged against the class's `<apiVersion>` ([Security Model](platform.md#security-model)).
 
 ```html
 <!-- ❌ The only check is in markup: any user with access to the Apex class can call voidInvoice directly -->
 <aura:if isTrue="{!v.isManager}"><lightning:button label="{!$Label.c.Invoice_Void}" onclick="{!c.handleVoid}"/></aura:if>
-
 <!-- ✅ Keep the markup check for the UI, and enforce the same custom permission in the Apex method -->
-```
 
-### Don't navigate to user-controlled URLs
-
-`force:navigateToURL` with a URL from page state, a record field, or an attribute the caller sets is an open redirect. Navigate with `lightning:navigation` and a page reference.
-
-```javascript
-// ❌ Open redirect: the URL comes from the page state (the component implements lightning:isUrlAddressable)
-handleBack: function (component) {
-    var navigate = $A.get('e.force:navigateToURL');
-    navigate.setParams({ url: component.get('v.pageReference').state.c__returnUrl });
-    navigate.fire();
-},
-
-// ✅ A page reference built from a known record (<lightning:navigation aura:id="nav"/> in the markup)
-handleBack: function (component) {
-    component.find('nav').navigate({
-        type: 'standard__recordPage',
-        attributes: { recordId: component.get('v.recordId'), objectApiName: 'Account', actionName: 'view' }
-    });
-}
-```
-
-### Let LDS enforce access; make custom Apex enforce it too
-
-`lightning:recordForm`, `lightning:recordEditForm`, `lightning:recordViewForm`, and `force:recordData` enforce CRUD, FLS, and sharing for the running user. A custom Apex controller gets none of that: its methods enforce access themselves ([The LWC-Apex Contract](lwc.md#the-lwc-apex-contract)), after you check the class's `<apiVersion>` ([Security Model](platform.md#security-model)).
-
-```html
 <!-- ✅ No Apex to secure: the form shows and saves only what the user may see and edit -->
 <lightning:recordEditForm recordId="{!v.recordId}" objectApiName="Invoice__c">
     <lightning:messages/>
     <lightning:inputField fieldName="Status__c"/>
-    <lightning:inputField fieldName="Amount__c"/>
     <lightning:button type="submit" label="{!$Label.c.Invoice_Save}"/>
 </lightning:recordEditForm>
 ```
+
+### Navigate with `lightning:navigation`
+
+Navigate with `lightning:navigation` page references (`component.find('nav').navigate({ type: 'standard__recordPage', ... })`), never with `force:navigateToURL` and a URL from page state, a record field, or an attribute the caller sets. The open-redirect rules live in [Allowlist redirect targets](visualforce.md#allowlist-redirect-targets).
 
 ---
 
@@ -364,7 +329,7 @@ handleRefresh: function (component, event, helper) {
 
 ### Declare typed attributes with defaults, and bound design attributes
 
-Untyped `Object` attributes without defaults make every consumer guess the shape and let `undefined` leak into expressions. `.design` attributes are set by admins in Lightning App Builder: bound them in metadata and still validate them in code.
+An `Object` attribute without a default makes every consumer guess the shape and lets `undefined` leak into expressions. Prefer specific types (`Integer`, `Boolean`, `Account[]`, an Apex class) with defaults; `Object` with a default stays acceptable for loosely shaped server data. `.design` attributes are set by admins in Lightning App Builder: bound them in metadata and still validate them in code.
 
 ```html
 <!-- ❌ An untyped attribute with no default -->
@@ -373,7 +338,6 @@ Untyped `Object` attributes without defaults make every consumer guess the shape
 <!-- ✅ Specific types, defaults, and private access for internal state -->
 <aura:attribute name="maxRows" type="Integer" default="50"/>
 <aura:attribute name="invoices" type="Object[]" default="[]" access="private"/>
-<aura:attribute name="isLoading" type="Boolean" default="false" access="private"/>
 
 <!-- ✅ invoiceList.design: a bounded builder property -->
 <design:component label="Open Invoices">
@@ -387,7 +351,7 @@ Untyped `Object` attributes without defaults make every consumer guess the shape
 
 ### Keep logic where it can be tested
 
-Aura has no maintained unit-test runner: Lightning Testing Service is archived and no longer supported, and it ran inside an org, which a static review can't do. Keep business rules in Apex, where Apex tests cover them and the server enforces them, or migrate the slice to LWC, where Jest runs locally ([Testing with Jest](lwc.md#testing-with-jest)).
+Aura has no maintained unit-test runner. Lightning Testing Service is archived and no longer supported, and it ran inside an org, which a static review can't do. Keep business rules in Apex, where Apex tests cover them and the server enforces them, or migrate the slice to LWC, where Jest runs locally ([Testing with Jest](lwc.md#testing-with-jest)).
 
 ```javascript
 // ❌ A pricing rule in the helper: no test runner covers it, and the browser can bypass it
@@ -403,53 +367,19 @@ showDiscount: function (component, response) {
 
 ### Lint Aura JavaScript with the Salesforce configs
 
-`@salesforce/eslint-plugin-aura` 3.x supports ESLint 9 only. Its `recommended` config parses Aura files as ES5 scripts and enables `vars-on-top`, `no-console`, and `@salesforce/aura/aura-api` for `$A` usage; `locker` adds `secure-document`, `secure-window`, and `ecma-intrinsics`. Bundle files are a bare object literal, so projects put `// eslint-disable-next-line no-unused-expressions` above `({`, as lwc-recipes does ([Tooling](platform.md#tooling)).
+`@salesforce/eslint-plugin-aura` 3.x supports ESLint 9 only ([Tooling](platform.md#tooling)).
 
-```javascript
-// eslint.config.js, following the lwc-recipes layout
-const { defineConfig } = require('eslint/config');
-const auraConfig = require('@salesforce/eslint-plugin-aura');
+- Its `recommended` config parses Aura files as ES5 scripts (`ecmaVersion: 5`) and enables `vars-on-top`, `no-console`, and `@salesforce/aura/aura-api` for `$A` usage.
+- `locker` adds `ecma-intrinsics`, `secure-document`, and `secure-window`.
 
-module.exports = defineConfig([
-    { files: ['force-app/main/default/aura/**/*.js'], extends: [...auraConfig.configs.recommended, ...auraConfig.configs.locker] }
-]);
-```
-
----
-
-## Review Checklist
-
-### Justification
-- [ ] A new Aura component documents the gap LWC can't fill; migration moves leaf components to LWC first, never the reverse
-- [ ] Business rules live in Apex or LWC, where tests cover them
-
-### Server actions
-- [ ] Every callback handles `SUCCESS`, `ERROR`, and `INCOMPLETE`, and clears loading state
-- [ ] Code in timers, promises, and library callbacks is wrapped in `$A.getCallback()` and checks `component.isValid()`
-- [ ] Storable (cacheable) callbacks are safe to run twice, views load with one action, and slow actions use `setBackground()`
-
-### Events
-- [ ] Component events for parent-child communication, application events only for app-wide signals, LMS to reach LWC or Visualforce
-- [ ] Parents call children through `aura:method`; fired events are registered, and a `destroy` handler removes listeners and timers
-
-### Rendering
-- [ ] `aura:if` and CSS toggling are chosen deliberately, and one-time values use unbound `{#v.x}` expressions
-- [ ] Large lists page, and DOM work happens only in renderers that call their super methods
-
-### Security
-- [ ] No `aura:unescapedHtml` or `innerHTML` with user data, and no navigation to user-controlled URLs
-- [ ] Access checks in markup are mirrored in Apex; custom controllers enforce sharing and CRUD/FLS, and LDS is used where it fits
-
-### Code organization & tests
-- [ ] Controllers delegate to helpers, no state lives on the shared helper, and attributes are typed with defaults
-- [ ] Aura JavaScript is linted with the `recommended` and `locker` configs
+The examples here therefore use `var` and function expressions. Where a project lints Aura with this config, don't ask for `const`, arrow functions, or `async`/`await` in Aura files; that part of the JavaScript Guide applies to LWC. Bundle files are a bare object literal, so projects put `// eslint-disable-next-line no-unused-expressions` above `({`. When the repo runs the linter, its hits are lint output, not review findings. ESLint executes the repo's config and plugins, so run it only on trusted code.
 
 ---
 
 ## References
 
-- Aura Components Developer Guide: [Introduction](https://developer.salesforce.com/docs/atlas.en-us.lightning.meta/lightning/intro_framework.htm) · [Calling a Server-Side Action](https://developer.salesforce.com/docs/atlas.en-us.lightning.meta/lightning/controllers_server_actions_call.htm) · [Storable Actions](https://developer.salesforce.com/docs/atlas.en-us.lightning.meta/lightning/controllers_server_storable_actions.htm) · [Modifying Components Outside the Framework Lifecycle](https://developer.salesforce.com/docs/atlas.en-us.lightning.meta/lightning/js_cb_mod_ext_js.htm) · [Checking Component Validity](https://developer.salesforce.com/docs/atlas.en-us.lightning.meta/lightning/js_cmp_isvalid.htm) · [Events Best Practices](https://developer.salesforce.com/docs/atlas.en-us.lightning.meta/lightning/events_best_practices.htm) · [Sharing JavaScript Code in a Component Bundle](https://developer.salesforce.com/docs/atlas.en-us.lightning.meta/lightning/js_helper.htm)
+- [Calling a Server-Side Action (Aura Components Developer Guide)](https://developer.salesforce.com/docs/atlas.en-us.lightning.meta/lightning/controllers_server_actions_call.htm)
+- [Storable Actions (Aura Components Developer Guide)](https://developer.salesforce.com/docs/atlas.en-us.lightning.meta/lightning/controllers_server_storable_actions.htm)
+- [Handle the render Event (Aura Components Developer Guide)](https://developer.salesforce.com/docs/platform/aura-platform/guide/js-render-handler.html)
 - [Enforcing CRUD and FLS in Aura Components (Salesforce Developers)](https://developer.salesforce.com/docs/platform/aura-platform/guide/apex-crud-fls.html)
-- LWC Developer Guide: [Migrate Aura Components](https://developer.salesforce.com/docs/platform/lwc/guide/migrate-introduction.html) · [Aura Coexistence](https://developer.salesforce.com/docs/platform/lwc/guide/interop-intro.html)
-- [Lightning Web Security (Salesforce Developers)](https://developer.salesforce.com/docs/platform/lightning-components-security/guide/lws-intro.html)
-- [forcedotcom/eslint-plugin-aura (GitHub)](https://github.com/forcedotcom/eslint-plugin-aura) · [forcedotcom/LightningTestingService, archived (GitHub)](https://github.com/forcedotcom/LightningTestingService)
+- [forcedotcom/eslint-plugin-aura (GitHub)](https://github.com/forcedotcom/eslint-plugin-aura)

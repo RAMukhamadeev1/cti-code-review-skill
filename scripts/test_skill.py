@@ -24,6 +24,13 @@ SKILL_ROOT = os.path.dirname(_HERE)
 SKILL_MD = os.path.join(SKILL_ROOT, 'SKILL.md')
 README = os.path.join(SKILL_ROOT, 'README.md')
 INDEX_HTML = os.path.join(SKILL_ROOT, 'index.html')
+LICENSE = os.path.join(SKILL_ROOT, 'LICENSE')
+PR_TEMPLATE = os.path.join(SKILL_ROOT, 'assets', 'pr-review-template.md')
+REPOSITORY = 'RAMukhamadeev1/cti-code-review-skill'
+
+# After auto-compaction Claude Code re-attaches only the first 5,000 tokens of a
+# skill; at roughly 3.5 characters per token this keeps all of SKILL.md.
+SKILL_MD_MAX_CHARS = 15_000
 
 # The script has a hyphen in its name, so load it by path.
 _spec = importlib.util.spec_from_file_location(
@@ -63,6 +70,7 @@ def file_stats(filename):
         additions=10,
         is_test=pr_analyzer.is_test_file(filename),
         is_config=pr_analyzer.is_config_file(filename),
+        is_generated=pr_analyzer.is_generated_file(filename),
         language=pr_analyzer.detect_language(filename),
     )
 
@@ -293,18 +301,33 @@ class FrontmatterTest(unittest.TestCase):
         self.assertLessEqual(len(description), 1024)
         self.assertNotRegex(description, r'<[^>]+>')  # no XML tags
 
+    def test_description_is_a_lean_trigger(self):
+        # The description sits in every session's skill listing: keep it to what
+        # the skill covers and when to use it. Rules live in the body.
+        description = ' '.join(self.fields['description'].split())
+        self.assertLessEqual(len(description), 700)
+        self.assertTrue(description.startswith('Code review for'), description)
+        for phrase in ('mentoring', 'never deploy', 'setting review standards'):
+            self.assertNotIn(phrase, description)
+
     def test_allowed_tools_are_read_only(self):
-        # Static review only: read-only tools, read-only git, and the bundled
-        # analyzer; never sf/sfdx or a general shell.
+        # Static review only: read-only tools, read-only git and gh, and the
+        # bundled analyzer; never sf/sfdx, a general shell, or unscoped WebFetch
+        # (reviewed code is untrusted input, so no pre-approved exfiltration path).
         allowed = self.fields['allowed-tools']
         analyzer = 'Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/pr-analyzer.py *)'
-        self.assertIn(analyzer, allowed)
+        for required in (analyzer, 'Bash(gh pr view *)', 'Bash(gh pr diff *)',
+                         'Bash(git merge-base *)'):
+            self.assertIn(required, allowed)
         for tool in allowed:
             with self.subTest(tool=tool):
                 self.assertTrue(
-                    tool in {'Read', 'Grep', 'Glob', 'WebFetch', analyzer}
-                    or re.fullmatch(r'Bash\(git (?:diff|log|show|status) \*\)', tool),
+                    tool in {'Read', 'Grep', 'Glob', analyzer}
+                    or re.fullmatch(r'Bash\(git (?:diff|log|show|status|merge-base|rev-parse'
+                                    r'|blame|ls-files) \*\)', tool)
+                    or re.fullmatch(r'Bash\(gh pr (?:view|diff|checks) \*\)', tool),
                     tool)
+                self.assertFalse(tool.startswith('WebFetch'), tool)
 
     def test_skill_dir_paths_exist(self):
         paths = set(re.findall(r'\$\{CLAUDE_SKILL_DIR\}/([\w./-]+)', read(SKILL_MD)))
@@ -312,6 +335,87 @@ class FrontmatterTest(unittest.TestCase):
         for path in paths:
             with self.subTest(path=path):
                 self.assertTrue(os.path.isfile(os.path.join(SKILL_ROOT, path)))
+
+
+# ═══════════════════════════════════════════════════════════════
+# SKILL.md body: an agent's procedure, not a human's
+# ═══════════════════════════════════════════════════════════════
+
+class SkillBodyTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = read(SKILL_MD)
+
+    def test_fits_the_compaction_budget(self):
+        self.assertLessEqual(len(self.text), SKILL_MD_MAX_CHARS)
+
+    def test_output_format_is_defined(self):
+        self.assertIn('output-format', anchors(SKILL_MD))
+        body = self.text.split('## Output Format', 1)[1].split('\n## ', 1)[0]
+        for marker in ('**Verdict:**', '**Scope:**', '### Findings', '### Questions',
+                       '`path/to/file', '(pre-existing)', 'Request changes', 'Approve'):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, body)
+
+    def test_standing_rules(self):
+        # Reviewed code, comments, and PR text are data; findings are verified
+        # before they are reported.
+        self.assertRegex(self.text, r'(?i)as data, not (?:as )?instructions')
+        self.assertRegex(self.text, r'(?i)verify each (?:candidate )?finding')
+
+    def test_no_human_process_content(self):
+        for pattern in (r'\(\d+-\d+ minutes\)', r'(?i)offer to pair', r'(?i)ask to split',
+                        r'(?i)question approach', '🎉', r'(?i)\[praise\]'):
+            with self.subTest(pattern=pattern):
+                self.assertNotRegex(self.text, pattern)
+
+    def test_diff_commands_survive_user_git_config(self):
+        # color.ui=always and diff.mnemonicPrefix/noprefix change what git prints
+        commands = re.findall(r'`(git diff [^`]*)`', self.text)
+        self.assertTrue(any('| python3 ${CLAUDE_SKILL_DIR}/scripts/pr-analyzer.py' in c
+                            for c in commands), commands)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIn('--no-color', command)
+                self.assertIn('--default-prefix', command)
+        # Uncommitted work: tracked changes against HEAD, and untracked files
+        self.assertIn('`git diff --no-color --default-prefix HEAD`', self.text)
+        self.assertIn('git status --porcelain', self.text)
+
+    def test_guides_are_read_checklist_first(self):
+        self.assertRegex(self.text, r'(?i)review checklist.{0,120}first')
+
+    def test_template_matches_the_output_format(self):
+        template = read(PR_TEMPLATE)
+        for marker in ('**Verdict:**', '**Scope:**', '### Findings', '### Questions'):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, template)
+        for gone in ('Review Time', '## Strengths', '- [ ]'):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, template)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Repository: license and install instructions
+# ═══════════════════════════════════════════════════════════════
+
+class RepositoryTest(unittest.TestCase):
+    def test_license_keeps_the_upstream_notice(self):
+        # Adapted from awesome-skills/code-review-skill (MIT): the copyright and
+        # permission notice must ship with every copy.
+        text = read(LICENSE)
+        self.assertTrue(text.startswith('MIT License\n'))
+        self.assertIn('Copyright (c) 2025 awesome-skills', text)
+        self.assertIn('Copyright (c) 2026 Ruslan Mukhamadeev', text)
+        self.assertIn('The above copyright notice and this permission notice shall be included '
+                      'in all\ncopies or substantial portions of the Software.', text)
+
+    def test_readme_names_the_repository(self):
+        text = read(README)
+        self.assertNotRegex(text, r'<owner>|<repo>|<repository-url>')
+        self.assertIn(f'npx skills add {REPOSITORY}', text)
+        self.assertIn(f'https://github.com/{REPOSITORY}.git', text)
+        self.assertIn('LICENSE', text)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -372,7 +476,9 @@ ROUTING_SAMPLES = {
     '`lwc/<bundle>/*`': (SF + 'lwc/accountList/accountList.js',),
     '`aura/<bundle>/*`': (SF + 'aura/AccountCard/AccountCardController.js',),
     '`*.page`': (SF + 'pages/AccountPage.page', SF + 'components/AccountHeader.component'),
-    '`*.flow-meta.xml`': (SF + 'flows/Account_Update.flow-meta.xml',),
+    '`*.flow-meta.xml`': (SF + 'flows/Account_Update.flow-meta.xml',
+                          SF + 'flowDefinitions/Account_Update.flowDefinition-meta.xml',
+                          SF + 'flowtests/Account_Update_Test.flowtest-meta.xml'),
     'Permission sets': tuple(SF + path for path in (
         'permissionsets/Sales.permissionset-meta.xml',
         'permissionsetgroups/Sales_Bundle.permissionsetgroup-meta.xml',

@@ -7,13 +7,16 @@ never reads repository files. It recognizes JavaScript/TypeScript, Node.js,
 NestJS, and Python code, and Salesforce DX projects (Apex, triggers, SOQL,
 LWC, Aura, Visualforce, flows, and metadata, in source format or the legacy
 MDAPI layout). Salesforce changes get platform-specific risk factors, and the
-suggestions end with the reference guides to load for the diff.
+suggestions end with the reference guides to load for the diff. Lockfiles,
+snapshots, and minified files don't count toward size or test risks.
 
 Usage:
     python3 pr-analyzer.py [--diff-file FILE] [--stats]
 
-    Or pipe a diff directly:
-    git diff main...HEAD | python3 pr-analyzer.py
+    Or pipe a diff directly (--no-color and --default-prefix undo user settings
+    such as color.ui=always and diff.mnemonicPrefix; the parser copes with them
+    anyway):
+    git diff --no-color --default-prefix main...HEAD | python3 pr-analyzer.py
 """
 
 import os
@@ -27,9 +30,15 @@ from typing import List, Dict, Optional
 RISK_NO_TESTS = "NO_TEST_CHANGES"
 RISK_APEX_NO_TESTS = "APEX_NO_TEST_CHANGES"
 
+NO_FILES_MESSAGE = (
+    "No files found in the input. Pass unified git diff output, for example: "
+    "git diff --no-color --default-prefix main...HEAD | python3 pr-analyzer.py"
+)
+
 # Apex saved at this API version or later is secure by default: a class with
-# no sharing keyword runs 'with sharing', database operations run in user
-# mode, and WITH SECURITY_ENFORCED no longer compiles.
+# no sharing keyword runs 'with sharing' (unless a parent class declares a
+# mode), database operations run in user mode (in trigger bodies too), and
+# WITH SECURITY_ENFORCED no longer compiles.
 SECURE_BY_DEFAULT_API_VERSION = 67.0  # Summer '26
 
 # Salesforce language labels
@@ -142,6 +151,7 @@ _SOURCE_TYPE_LANGUAGES = {
     'component': LANG_VISUALFORCE,
     'flow': LANG_FLOW,
     'flowdefinition': LANG_FLOW,
+    'flowtest': LANG_FLOW,
 }
 
 # Legacy MDAPI layout ('<dir>/<Name>.<suffix>', no '-meta.xml'): a file counts
@@ -164,6 +174,7 @@ _MDAPI_SUFFIX_BY_DIRECTORY = {
     'flexipages': 'flexipage',
     'flowdefinitions': 'flowdefinition',
     'flows': 'flow',
+    'flowtests': 'flowtest',
     'globalvaluesets': 'globalvalueset',
     'groups': 'group',
     'labels': 'labels',
@@ -230,26 +241,68 @@ _SCHEMA_TYPES = frozenset({
 _APEX_META_SUFFIXES = ('.cls-meta.xml', '.trigger-meta.xml')
 _API_VERSION_LINE_RE = re.compile(r'^([+-])\s*<apiVersion>(\d+(?:\.\d+)?)</apiVersion>\s*$')
 
+# Diff headers. The default prefixes are a/ and b/; diff.mnemonicPrefix uses
+# a pair of different letters (i/ w/ c/ o/, or 1/ 2/ for --no-index), and
+# diff.noprefix drops them. Renames and copies also name the new path, without
+# a prefix, on their "rename to" / "copy to" line.
+_STANDARD_HEADER_RE = re.compile(r'diff --git a/(.+?) b/\1$')
+_MNEMONIC_HEADER_RE = re.compile(r'diff --git ([icwo12])/(.+?) ([icwo12])/\2$')
+_SAME_PATH_HEADER_RE = re.compile(r'diff --git (.+?) \1$')
+_QUOTED_PAIR_HEADER_RE = re.compile(r'diff --git ("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")$')
+_NEW_PATH_LINES = ('rename to ', 'copy to ')
+
 # Git C-quotes a diff header path that has special characters, including
 # non-ASCII names under the default core.quotePath: "b/caf\303\251.md"
 _QUOTED_B_PATH_RE = re.compile(r' ("b/(?:[^"\\]|\\.)*")$')
 _C_QUOTED_PART_RE = re.compile(r'\\([0-3][0-7]{2}|.)|([^\\]+)')
 _C_ESCAPES = {'a': '\a', 'b': '\b', 't': '\t', 'n': '\n', 'v': '\v', 'f': '\f', 'r': '\r'}
 
+# color.ui=always keeps SGR escape codes in piped output
+_ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+
+# Generated files: reviewed by their source, so they count toward neither size
+# nor test risks
+_LOCKFILE_NAMES = frozenset({
+    'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml',
+    'bun.lock', 'bun.lockb', 'poetry.lock', 'Pipfile.lock', 'uv.lock', 'pdm.lock',
+})
+_GENERATED_PATH_RE = re.compile(
+    r'(?:^|/)__snapshots__/|\.snap$|\.min\.(?:js|css)$|\.(?:js|css)\.map$')
+
+# Security-sensitive names, matched as whole words of the path (camelCase and
+# snake_case split), so Author, Authority, or Tokenizer don't match
+_SECURITY_WORDS = frozenset({
+    'auth', 'authn', 'authz', 'oauth', 'oauth2', 'authenticate', 'authentication',
+    'authenticator', 'authorization', 'authorize', 'authorizer', 'security',
+    'password', 'passwords', 'passwd', 'secret', 'secrets', 'token', 'tokens',
+    'credential', 'credentials', 'jwt', 'saml', 'sso', 'csrf', 'crypto', 'encrypt',
+    'decrypt', 'encryption',
+})
+_CAMEL_BOUNDARY_RE = re.compile(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])')
+# Docs and Aura design-token bundles (*.tokens) are not sensitive by name
+_NOT_SECURITY_SENSITIVE = ('.md', '.tokens', '.tokens-meta.xml')
+
 # Meta files that only accompany a code file (Foo.cls + Foo.cls-meta.xml)
 _CODE_COMPANION_META_RE = re.compile(r'\.(?:cls|trigger|page|component)-meta\.xml$')
 
 _JEST_TESTS_DIRECTORY_RE = re.compile(r'(?:^|/)__tests__/')
 
-# Content hints read from added diff lines (the diff is already in memory;
+# Content hints read from diff lines (the diff is already in memory;
 # repository files are never read). SOQL/SOSL in Apex adds soql-sosl.md;
-# Node.js imports or process usage in JS/TS adds nodejs.md.
+# Node.js imports or process usage in JS/TS adds nodejs.md; NestJS imports or
+# decorators add nestjs.md; @isTest marks an Apex test class whatever its name.
 _SOQL_HINT_RE = re.compile(
     r'\[\s*(?:SELECT|FIND)\b'
     r'|\bDatabase\.(?:query|countQuery|getQueryLocator|getCursor|getPaginationCursor)\w*\s*\('
-    r'|\bSearch\.(?:query|find)\s*\(',
+    r'|\bSearch\.(?:query|find)\s*\('
+    # Dynamic query strings: 'SELECT Id FROM …', 'SELECT COUNT() FROM …', 'FIND {…}'
+    r"|'\s*SELECT\s+[\w.()]+\s*(?:,|FROM\b)"
+    r"|'\s*FIND\s*\{",
     re.IGNORECASE,
 )
+# The second line of a query split after its bracket (Prettier Apex style)
+_SOQL_CONTINUATION_RE = re.compile(r'\s*(?:SELECT|FIND)\b', re.IGNORECASE)
+_APEX_TEST_ANNOTATION_RE = re.compile(r'@istest\b', re.IGNORECASE)
 _NODE_MODULES = (
     r'node:[\w/]+|express|fastify|koa|pg|mysql2|mongodb|mongoose'
     r'|fs|fs/promises|path|child_process|http|https|net|stream|stream/promises|worker_threads|cluster'
@@ -259,10 +312,16 @@ _NODE_HINT_RE = re.compile(
     r'|\bprocess\.(?:env|on|once|exit|exitCode|argv|cwd)\b'
 )
 
-# NestJS naming conventions (nest-cli.json is matched by name)
+# NestJS naming conventions that Angular doesn't share; module, service, guard,
+# interceptor, pipe, and resolver files need a content hint instead
+# (nest-cli.json is matched by name)
 _NEST_FILE_RE = re.compile(
-    r'\.(?:controller|module|guard|interceptor|pipe|filter|gateway|resolver|dto|entity|strategy)'
+    r'\.(?:controller|dto|entity|gateway|filter|strategy)'
     r'(?:\.(?:spec|e2e-spec|test))?\.ts$'
+)
+_NEST_HINT_RE = re.compile(
+    r"""(?:\bfrom\s+|\brequire\(\s*|\bimport\s*\(\s*)['"]@nestjs/"""
+    r'|@(?:Module|Controller)\('
 )
 
 
@@ -274,12 +333,14 @@ class FileStats:
     deletions: int = 0
     is_test: bool = False
     is_config: bool = False
+    is_generated: bool = False  # lockfiles, snapshots, minified files
     language: str = "unknown"
     change_type: str = CHANGE_MODIFIED  # 'added' | 'deleted' | 'renamed' | 'modified'
     api_version_before: Optional[float] = None  # Apex meta files only
     api_version_after: Optional[float] = None  # Apex meta files only
     has_soql: bool = False  # Apex source with SOQL/SOSL in an added line
     uses_node: bool = False  # JS/TS with a Node.js import or process usage in an added line
+    uses_nest: bool = False  # JS/TS with a NestJS import or decorator in an added line
 
 
 @dataclass
@@ -291,9 +352,9 @@ class PRAnalysis:
     files: List[FileStats]
     complexity_score: float
     size_category: str
-    estimated_review_time: int
     risk_factors: List[str]
     suggestions: List[str]
+    generated_changes: int = 0  # lines in generated files, not counted toward size
 
 
 def _normalize_path(filename: str) -> str:
@@ -410,10 +471,38 @@ def is_test_file(filename: str) -> bool:
         r'(?:^|/)tests?/',           # tests/ or test/ directory
         r'(?:^|/)__tests__/',        # __tests__/ directory (Jest, incl. LWC bundles)
         r'(?:^|/)spec/',             # spec/ directory (Jasmine-style suites)
+        r'(?:^|/)flowtests/',        # Salesforce flow tests
     ]
     if any(re.search(p, path) for p in test_patterns):
         return True
     return any(p.search(path) for p in _APEX_TEST_CLASS_PATTERNS)
+
+
+def is_generated_file(filename: str) -> bool:
+    """Lockfiles, test snapshots, minified bundles, and source maps."""
+    path = _normalize_path(filename)
+    return _basename(path) in _LOCKFILE_NAMES or bool(_GENERATED_PATH_RE.search(path))
+
+
+def _path_words(path: str) -> List[str]:
+    """Lowercase words of a path, split at separators and camelCase boundaries."""
+    words = []
+    for part in re.split(r'[^A-Za-z0-9]+', path):
+        words.extend(word.lower() for word in _CAMEL_BOUNDARY_RE.split(part) if word)
+    return words
+
+
+def is_security_sensitive(filename: str) -> bool:
+    """Env files, and paths with a security word such as auth, token, or secret."""
+    path = _normalize_path(filename)
+    name = _basename(path)
+    if name in ('.env', '.envrc') or name.startswith('.env.'):
+        return True
+    if name.lower().endswith(_NOT_SECURITY_SENSITIVE):
+        return False
+    if _metadata_type(path) in _INTEGRATION_TYPES:
+        return False  # Salesforce credentials and endpoints get their own risk line
+    return any(word in _SECURITY_WORDS for word in _path_words(path))
 
 
 def is_config_file(filename: str) -> bool:
@@ -512,23 +601,71 @@ def _unquote_c_style(quoted: str) -> str:
     return raw.decode('utf-8', errors='replace')
 
 
-def _diff_header_path(line: str) -> Optional[str]:
-    """The b/ side path of a "diff --git a/<path> b/<path>" header, else None.
+def _path_from_sides(a_side: str, b_side: str) -> str:
+    """The file path from the two unquoted sides of a header ('' if unknown)."""
+    if a_side.startswith('a/') and b_side.startswith('b/'):
+        return b_side[2:]
+    if (a_side[1:2] == b_side[1:2] == '/' and a_side[:1] != b_side[:1]
+            and a_side[2:] == b_side[2:]):
+        return b_side[2:]  # mnemonic prefixes
+    return b_side if a_side == b_side else ''  # no prefixes
 
-    The b/ side is matched via a backreference so a literal "b/" inside paths
-    like lib/, web/ or db/ can't be mistaken for the prefix. Renames and copies
-    have differing paths, so fall back to the b/ side after the separating
-    space, which git C-quotes when the path has special characters.
+
+def _diff_header_path(line: str) -> Optional[str]:
+    """The file path named by a "diff --git <a-side> <b-side>" header, else None.
+
+    Paths are matched with a backreference, so a literal "b/" inside paths like
+    lib/, web/ or db/ can't be mistaken for the prefix. Mnemonic prefixes (a
+    pair of different letters, e.g. c/ and w/) and no prefixes at all are read
+    from headers whose two sides name the same path. Renames and copies have
+    differing paths, so fall back to the b/ side after the separating space,
+    which git C-quotes when the path has special characters; parse_diff then
+    takes the path from the "rename to" / "copy to" line.
     """
     header = line.rstrip('\r')  # a diff saved with CRLF line endings
-    match = re.match(r'diff --git a/(.+?) b/\1$', header)
+    match = _STANDARD_HEADER_RE.match(header)
     if match:
         return match.group(1)
+    match = _MNEMONIC_HEADER_RE.match(header)
+    if match and match.group(1) != match.group(3):
+        return match.group(2)
+    match = _SAME_PATH_HEADER_RE.match(header)
+    if match and not match.group(1).startswith('"'):
+        return match.group(1)
+    match = _QUOTED_PAIR_HEADER_RE.match(header)
+    if match:
+        path = _path_from_sides(*(_unquote_c_style(side) for side in match.groups()))
+        if path:
+            return path
     match = _QUOTED_B_PATH_RE.search(header)
     if match:
         return _unquote_c_style(match.group(1))[len('b/'):]
     match = re.search(r' b/(.+)$', header)
     return match.group(1) if match else None
+
+
+def _new_path(line: str) -> str:
+    """The path of a "rename to <path>" or "copy to <path>" line."""
+    path = line.rstrip('\r').split(' ', 2)[2]
+    return _unquote_c_style(path) if path.startswith('"') else path
+
+
+def _classify(stats: FileStats, filename: str) -> FileStats:
+    """Set the file name and everything derived from it."""
+    stats.filename = filename
+    stats.language = detect_language(filename)
+    stats.is_test = is_test_file(filename)
+    stats.is_config = is_config_file(filename)
+    stats.is_generated = is_generated_file(filename)
+    return stats
+
+
+def _scan_modes(stats: FileStats):
+    """(track apiVersion, scan Apex source, scan JS/TS) for a file."""
+    name = stats.filename.lower()
+    return (name.endswith(_APEX_META_SUFFIXES),
+            stats.language == LANG_APEX and not name.endswith(_META_XML),
+            stats.language in ('JavaScript', 'TypeScript'))
 
 
 def parse_diff(diff_content: str) -> List[FileStats]:
@@ -537,62 +674,78 @@ def parse_diff(diff_content: str) -> List[FileStats]:
     Besides line counts, records each file's change type from the extended
     header lines (new, deleted, renamed, or copied file) and, for Apex class
     and trigger meta files, the <apiVersion> before and after the change.
-    Added lines also feed two guide hints: SOQL/SOSL in Apex source
-    (has_soql) and Node.js imports or process usage in JS/TS (uses_node).
+    Diff lines also feed guide hints: SOQL/SOSL in Apex source (has_soql, also
+    for a query split after its bracket), @isTest (is_test), and Node.js or
+    NestJS usage in JS/TS (uses_node, uses_nest). Color codes are ignored.
     """
     files = []
     current_file = None
+    awaiting_path = False  # a header without a readable path; "rename to" may name it
     in_hunk = False
-    track_api_version = False
-    scan_soql = False
-    scan_node = False
+    track_api_version = scan_apex = scan_script = False
+    bracket_open = False  # the last new-side Apex line ended with '['
 
     for line in diff_content.split('\n'):
+        if '\x1b' in line:
+            line = _ANSI_ESCAPE_RE.sub('', line)
         # New file header
         if line.startswith('diff --git'):
             if current_file:
                 files.append(current_file)
-            in_hunk = False
+            in_hunk = bracket_open = False
             filename = _diff_header_path(line)
-            if filename:
-                current_file = FileStats(
-                    filename=filename,
-                    language=detect_language(filename),
-                    is_test=is_test_file(filename),
-                    is_config=is_config_file(filename),
-                )
-                track_api_version = filename.lower().endswith(_APEX_META_SUFFIXES)
-                scan_soql = (current_file.language == LANG_APEX
-                             and not filename.lower().endswith(_META_XML))
-                scan_node = current_file.language in ('JavaScript', 'TypeScript')
-            else:
-                current_file = None
-        elif current_file:
-            # Extended header lines come before the first hunk and never
-            # start with '+' or '-'. Inside a hunk, "+++"/"---" are content.
-            if line.startswith('@@'):
-                in_hunk = True
-            elif not in_hunk and line.startswith('new file mode'):
-                current_file.change_type = CHANGE_ADDED
-            elif not in_hunk and line.startswith('deleted file mode'):
-                current_file.change_type = CHANGE_DELETED
-            elif not in_hunk and line.startswith('rename from '):
-                current_file.change_type = CHANGE_RENAMED
-            elif not in_hunk and line.startswith('copy from '):
-                # A copy creates the destination file
-                current_file.change_type = CHANGE_ADDED
-            elif line.startswith('+') and (in_hunk or not line.startswith('+++')):
-                current_file.additions += 1
-                if track_api_version:
-                    _record_api_version(current_file, line)
-                if scan_soql and not current_file.has_soql and _SOQL_HINT_RE.search(line):
+            current_file = _classify(FileStats(filename=''), filename) if filename else None
+            awaiting_path = current_file is None
+            if current_file:
+                track_api_version, scan_apex, scan_script = _scan_modes(current_file)
+            continue
+        # Extended header lines come before the first hunk and never start
+        # with '+' or '-'. Inside a hunk, "+++"/"---" are content.
+        if not in_hunk and (current_file or awaiting_path) and line.startswith(_NEW_PATH_LINES):
+            current_file = _classify(current_file or FileStats(filename=''), _new_path(line))
+            awaiting_path = False
+            # A copy creates the destination file
+            current_file.change_type = (CHANGE_RENAMED if line.startswith('rename')
+                                        else CHANGE_ADDED)
+            track_api_version, scan_apex, scan_script = _scan_modes(current_file)
+            continue
+        if not current_file:
+            continue
+        if line.startswith('@@'):
+            in_hunk = True
+        elif not in_hunk and line.startswith('new file mode'):
+            current_file.change_type = CHANGE_ADDED
+        elif not in_hunk and line.startswith('deleted file mode'):
+            current_file.change_type = CHANGE_DELETED
+        elif not in_hunk and line.startswith('rename from '):
+            current_file.change_type = CHANGE_RENAMED
+        elif not in_hunk and line.startswith('copy from '):
+            current_file.change_type = CHANGE_ADDED
+        elif line.startswith('+') and (in_hunk or not line.startswith('+++')):
+            current_file.additions += 1
+            content = line[1:]
+            if track_api_version:
+                _record_api_version(current_file, line)
+            if scan_apex:
+                if not current_file.has_soql and (
+                        _SOQL_HINT_RE.search(content)
+                        or (bracket_open and _SOQL_CONTINUATION_RE.match(content))):
                     current_file.has_soql = True
-                if scan_node and not current_file.uses_node and _NODE_HINT_RE.search(line):
+                bracket_open = _update_bracket(bracket_open, content)
+                _mark_apex_test(current_file, content)
+            if scan_script:
+                if not current_file.uses_node and _NODE_HINT_RE.search(content):
                     current_file.uses_node = True
-            elif line.startswith('-') and (in_hunk or not line.startswith('---')):
-                current_file.deletions += 1
-                if track_api_version:
-                    _record_api_version(current_file, line)
+                if not current_file.uses_nest and _NEST_HINT_RE.search(content):
+                    current_file.uses_nest = True
+        elif line.startswith('-') and (in_hunk or not line.startswith('---')):
+            current_file.deletions += 1
+            if track_api_version:
+                _record_api_version(current_file, line)
+        elif in_hunk and scan_apex and line.startswith(' '):
+            # Unchanged context: part of the new file too
+            bracket_open = _update_bracket(bracket_open, line[1:])
+            _mark_apex_test(current_file, line[1:])
 
     if current_file:
         files.append(current_file)
@@ -600,8 +753,26 @@ def parse_diff(diff_content: str) -> List[FileStats]:
     return files
 
 
+def _update_bracket(bracket_open: bool, content: str) -> bool:
+    """Whether a query may start on the next line; blank lines keep the state."""
+    stripped = content.rstrip()
+    return stripped.endswith('[') if stripped else bracket_open
+
+
+def _mark_apex_test(stats: FileStats, content: str) -> None:
+    """An @isTest annotation makes the class a test class, whatever its name."""
+    if not stats.is_test and _APEX_TEST_ANNOTATION_RE.search(content):
+        stats.is_test = True
+
+
+def reviewable_changes(files: List[FileStats]) -> int:
+    """Changed lines outside generated files (lockfiles, snapshots, minified)."""
+    return sum(f.additions + f.deletions for f in files if not f.is_generated)
+
+
 def calculate_complexity(files: List[FileStats]) -> float:
-    """Calculate complexity score (0-1 scale)."""
+    """Calculate complexity score (0-1 scale); generated files don't count."""
+    files = [f for f in files if not f.is_generated]
     if not files:
         return 0.0
 
@@ -649,21 +820,20 @@ def categorize_size(total_changes: int) -> str:
     elif total_changes < 800:
         return "L (Large)"
     else:
-        return "XL (Extra Large) - Consider splitting"
+        return "XL (Extra Large)"
 
 
-def estimate_review_time(files: List[FileStats], complexity: float) -> int:
-    """Estimate review time in minutes."""
-    total_changes = sum(f.additions + f.deletions for f in files)
-
-    # Base time: ~1 minute per 20 lines
-    base_time = total_changes / 20
-
-    # Adjust for complexity
-    adjusted_time = base_time * (1 + complexity)
-
-    # Minimum 5 minutes, maximum 120 minutes
-    return max(5, min(120, int(adjusted_time)))
+def _is_testable_code(f: FileStats) -> bool:
+    """Present, non-test source that unit tests cover: Python, JS/TS, LWC and
+    Aura scripts, and Apex classes and triggers (not docs, config, metadata,
+    or generated files)."""
+    if f.is_test or f.is_config or f.is_generated or f.change_type == CHANGE_DELETED:
+        return False
+    if f.language in ('Python', 'JavaScript', 'TypeScript'):
+        return True
+    if f.language in (LANG_LWC, LANG_AURA):
+        return _suffix(f.filename) in ('js', 'ts')
+    return _is_apex_source(f)
 
 
 def _is_salesforce_file(f: FileStats) -> bool:
@@ -743,11 +913,19 @@ def _salesforce_risks(files: List[FileStats]) -> List[str]:
             "logic in a handler, 200-record bulk safety, and recursion guards"
         )
 
-    flows = [f for f in present if f.language == LANG_FLOW]
+    flows = [f for f in present if f.language == LANG_FLOW and not f.is_test]
     if flows:
         risks.append(
             f"Flow changed ({len(flows)} file(s)) - check active status, entry conditions, "
             "fault paths, data elements inside loops, and run-as context"
+        )
+
+    flow_definitions = [f for f in present if _metadata_type(f.filename) == 'flowdefinition']
+    if flow_definitions:
+        risks.append(
+            f"FlowDefinition in source ({len(flow_definitions)} file(s)) - its "
+            "activeVersionNumber overrides each flow's <status> on every deploy; commit one "
+            "only for a one-off deactivation (activeVersionNumber 0)"
         )
 
     schema = [f for f in present if _metadata_type(f.filename) in _SCHEMA_TYPES]
@@ -784,15 +962,40 @@ def _salesforce_risks(files: List[FileStats]) -> List[str]:
             "drop data"
         )
 
-    # Only classes change behavior: triggers run in system mode at every API version.
+    # A rename deploys a new component; the old one stays in the org. A code
+    # file and its companion meta file count once.
+    renamed = [f for f in files
+               if f.change_type == CHANGE_RENAMED and _is_deployable_metadata(f)]
+    renamed_names = {f.filename for f in renamed}
+    renamed = [f for f in renamed
+               if not (_CODE_COMPANION_META_RE.search(f.filename)
+                       and f.filename[:-len(_META_XML)] in renamed_names)]
+    if renamed:
+        risks.append(
+            f"Salesforce metadata renamed in source ({len(renamed)} file(s)) - the old API "
+            "name stays in orgs until destructiveChanges removes it, and references to it break"
+        )
+
+    # Both change at 67.0: classes get sharing and user-mode defaults; database
+    # operations in trigger bodies run in user mode (the trigger context itself
+    # stays without sharing).
     raised = [f for f in files
-              if f.filename.endswith('.cls-meta.xml') and _crosses_secure_by_default(f)]
+              if f.filename.lower().endswith('.cls-meta.xml') and _crosses_secure_by_default(f)]
     if raised:
         risks.append(
             f"Apex class apiVersion raised to {SECURE_BY_DEFAULT_API_VERSION}+ on {len(raised)} "
-            "file(s) - classes without a sharing keyword (and undeclared classes in their "
-            "inheritance chain) become 'with sharing', database operations run in user mode, "
-            "and WITH SECURITY_ENFORCED no longer compiles"
+            "file(s) - classes without a sharing keyword run 'with sharing' unless a parent "
+            "class declares one (undeclared subclasses saved at older versions switch too), "
+            "database operations run in user mode, and WITH SECURITY_ENFORCED no longer compiles"
+        )
+    raised_triggers = [f for f in files if f.filename.lower().endswith('.trigger-meta.xml')
+                       and _crosses_secure_by_default(f)]
+    if raised_triggers:
+        risks.append(
+            f"Apex trigger apiVersion raised to {SECURE_BY_DEFAULT_API_VERSION}+ on "
+            f"{len(raised_triggers)} file(s) - SOQL, SOSL, and DML in the trigger body run in "
+            "user mode (sharing, CRUD, and FLS) unless they specify system mode; the trigger "
+            "context itself stays without sharing"
         )
 
     return risks
@@ -802,22 +1005,24 @@ def identify_risk_factors(files: List[FileStats]) -> List[str]:
     """Identify potential risk factors in the PR (Salesforce risks last)."""
     risks = []
 
-    total_changes = sum(f.additions + f.deletions for f in files)
-    test_changes = sum(f.additions + f.deletions for f in files if f.is_test)
-
-    if total_changes > 400:
+    if reviewable_changes(files) > 400:
         risks.append("Large PR (>400 lines) - harder to review thoroughly")
 
-    if test_changes == 0 and total_changes > 50:
+    # Test risks weigh only code that unit tests cover: docs, config, metadata,
+    # and generated files don't need tests, and deleted code needs none.
+    code_changes = sum(f.additions + f.deletions for f in files if _is_testable_code(f))
+    test_changes = sum(f.additions + f.deletions for f in files
+                       if f.is_test and not f.is_generated)
+
+    if test_changes == 0 and code_changes > 50:
         risks.append(f"{RISK_NO_TESTS}: No test changes - verify test coverage")
 
-    if total_changes > 100 and test_changes / max(total_changes, 1) < 0.2:
+    if code_changes > 100 and test_changes / (code_changes + test_changes) < 0.2:
         risks.append("Low test ratio (<20%) - consider adding more tests")
 
     # Security-sensitive files
-    security_patterns = ['.env', 'auth', 'security', 'password', 'token', 'secret']
     for f in files:
-        if any(p in f.filename.lower() for p in security_patterns):
+        if is_security_sensitive(f.filename):
             risks.append(f"Security-sensitive file: {f.filename}")
             break
 
@@ -859,8 +1064,9 @@ def _script_guides(ext: str) -> List[str]:
 def recommend_guides(files: List[FileStats]) -> List[str]:
     """Recommend reference guides for the changed files.
 
-    Mostly name-based, plus the two content hints set by parse_diff (SOQL/SOSL
-    in Apex, Node.js usage in JS/TS). Deterministic: returns guide paths
+    Mostly name-based, plus the content hints set by parse_diff (SOQL/SOSL in
+    Apex, Node.js and NestJS usage in JS/TS). NestJS adds only nestjs.md;
+    nodejs.md comes from Node.js usage. Deterministic: returns guide paths
     (relative to the skill root) in the fixed GUIDE_ORDER, without duplicates.
     """
     selected = set()
@@ -901,8 +1107,9 @@ def recommend_guides(files: List[FileStats]) -> List[str]:
         elif language == 'Python':
             selected.add(GUIDE_PYTHON)
 
-        if basename == 'nest-cli.json' or (language == 'TypeScript' and _NEST_FILE_RE.search(path)):
-            selected.update((GUIDE_NESTJS, GUIDE_NODEJS))
+        if (basename == 'nest-cli.json' or f.uses_nest
+                or (language == 'TypeScript' and _NEST_FILE_RE.search(path))):
+            selected.add(GUIDE_NESTJS)
         if f.has_soql:
             selected.add(GUIDE_SF_SOQL)
         if f.uses_node:
@@ -947,17 +1154,17 @@ def generate_suggestions(files: List[FileStats], complexity: float, risks: List[
     """Generate review suggestions, ending with the guides to load."""
     suggestions = []
 
-    total_changes = sum(f.additions + f.deletions for f in files)
-
-    if total_changes > 800:
-        suggestions.append("Consider splitting this PR into smaller, focused changes")
+    if reviewable_changes(files) > 800:
+        suggestions.append("Very large diff: review the riskiest files first, and list "
+                           "anything not reviewed under Scope in the review")
 
     if complexity > 0.7:
-        suggestions.append("High complexity - allocate extra review time")
-        suggestions.append("Consider pair reviewing for critical sections")
+        suggestions.append("High complexity: split the review by area (for example one pass "
+                           "per stack), each with only its guides")
 
     if _has_risk(risks, RISK_NO_TESTS):
-        suggestions.append("Request test additions before approval")
+        suggestions.append("No tests changed: check that the changed code paths are covered, "
+                           "and ask for tests where behavior changed")
 
     # Language-specific suggestions
     languages = set(f.language for f in files)
@@ -971,8 +1178,8 @@ def generate_suggestions(files: List[FileStats], complexity: float, risks: List[
 
     if _has_risk(risks, RISK_APEX_NO_TESTS):
         suggestions.append(
-            "Request Apex test updates: bulk (200+ records), negative paths, and "
-            "System.runAs() permission cases with meaningful Assert messages"
+            "Request Apex test updates: bulk (201+ records, so a second trigger chunk runs), "
+            "negative paths, and System.runAs() permission cases with meaningful Assert messages"
         )
 
     if not suggestions:
@@ -991,7 +1198,7 @@ def analyze_pr(diff_content: str) -> PRAnalysis:
 
     total_additions = sum(f.additions for f in files)
     total_deletions = sum(f.deletions for f in files)
-    total_changes = total_additions + total_deletions
+    reviewable = reviewable_changes(files)
 
     complexity = calculate_complexity(files)
     risks = identify_risk_factors(files)
@@ -1003,10 +1210,10 @@ def analyze_pr(diff_content: str) -> PRAnalysis:
         total_deletions=total_deletions,
         files=files,
         complexity_score=complexity,
-        size_category=categorize_size(total_changes),
-        estimated_review_time=estimate_review_time(files, complexity),
+        size_category=categorize_size(reviewable),
         risk_factors=risks,
         suggestions=suggestions,
+        generated_changes=total_additions + total_deletions - reviewable,
     )
 
 
@@ -1021,10 +1228,12 @@ def print_analysis(analysis: PRAnalysis, show_files: bool = False):
     print(f"   Additions: +{analysis.total_additions}")
     print(f"   Deletions: -{analysis.total_deletions}")
     print(f"   Total changes: {analysis.total_additions + analysis.total_deletions}")
+    if analysis.generated_changes:
+        print(f"   Generated (lockfiles, snapshots, minified): {analysis.generated_changes} "
+              "lines, not counted toward size")
 
     print(f"\n📏 SIZE: {analysis.size_category}")
     print(f"   Complexity score: {analysis.complexity_score}/1.0")
-    print(f"   Estimated review time: ~{analysis.estimated_review_time} minutes")
 
     if analysis.risk_factors:
         print(f"\n⚠️  RISK FACTORS:")
@@ -1065,7 +1274,7 @@ def main():
         elif not sys.stdin.isatty():
             diff_content = sys.stdin.buffer.read().decode('utf-8', errors='replace')
         else:
-            print("Usage: git diff main...HEAD | python3 pr-analyzer.py")
+            print("Usage: git diff --no-color --default-prefix main...HEAD | python3 pr-analyzer.py")
             print("       python3 pr-analyzer.py -f diff.txt")
             sys.exit(1)
     except OSError as e:
@@ -1077,6 +1286,10 @@ def main():
         sys.exit(1)
 
     analysis = analyze_pr(diff_content)
+    if not analysis.files:
+        # Not git diff output: an empty report would read as "nothing to review"
+        print(NO_FILES_MESSAGE, file=sys.stderr)
+        sys.exit(1)
     # Windows pipes default to the ANSI code page, which cannot encode the
     # report's emoji; write UTF-8 whatever the locale.
     if hasattr(sys.stdout, 'reconfigure'):

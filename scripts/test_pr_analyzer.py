@@ -6,6 +6,7 @@ import importlib.util
 import io
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -51,6 +52,7 @@ def make_file(filename, additions=10, deletions=0, change_type='modified'):
         deletions=deletions,
         is_test=pr_analyzer.is_test_file(filename),
         is_config=pr_analyzer.is_config_file(filename),
+        is_generated=pr_analyzer.is_generated_file(filename),
         language=pr_analyzer.detect_language(filename),
         change_type=change_type,
     )
@@ -189,9 +191,9 @@ class ParseDiffFilenameTest(unittest.TestCase):
         self.assertEqual((files[0].additions, files[0].deletions), (1, 1))
 
     def test_unparsable_header_skips_the_file(self):
-        # A header without a b/ path (e.g. from diff.noprefix) names no file.
-        # Its lines are dropped instead of being added to the previous file.
-        for header in ('diff --git', 'diff --git app.py app.py', 'diff --git "a/x" "b/"'):
+        # A header that names no file has its lines dropped instead of being
+        # added to the previous file.
+        for header in ('diff --git', 'diff --git "a/x" "b/"'):
             with self.subTest(header=header):
                 diff = (
                     "diff --git a/src/app.py b/src/app.py\n"
@@ -209,6 +211,144 @@ class ParseDiffFilenameTest(unittest.TestCase):
                 files = pr_analyzer.parse_diff(diff)
                 self.assertEqual([(f.filename, f.additions, f.deletions) for f in files],
                                  [('src/app.py', 1, 1), ('src/util.py', 1, 0)])
+
+    def test_prefix_configurations(self):
+        # diff.mnemonicPrefix (i/ w/ c/ o/ 1/ 2/) and diff.noprefix change the
+        # header; a path that starts with a directory must stay whole.
+        cases = {
+            'diff --git i/src/app.py w/src/app.py': 'src/app.py',   # index vs work tree
+            'diff --git c/src/app.py w/src/app.py': 'src/app.py',   # commit vs work tree
+            'diff --git c/src/app.py i/src/app.py': 'src/app.py',   # --cached
+            'diff --git 1/notes.md 2/notes.md': 'notes.md',         # --no-index
+            'diff --git src/app.py src/app.py': 'src/app.py',       # diff.noprefix
+            'diff --git app.py app.py': 'app.py',
+            'diff --git docs/a b.md docs/a b.md': 'docs/a b.md',
+        }
+        for header, expected in cases.items():
+            with self.subTest(header=header):
+                files = pr_analyzer.parse_diff(header + "\n@@ -1 +1 @@\n-a = 1\n+a = 2\n")
+                self.assertEqual([(f.filename, f.additions, f.deletions) for f in files],
+                                 [(expected, 1, 1)])
+
+    def test_quoted_paths_with_other_prefixes(self):
+        cases = {
+            'diff --git "c/caf\\303\\251.md" "w/caf\\303\\251.md"': 'café.md',  # mnemonic
+            'diff --git "caf\\303\\251.md" "caf\\303\\251.md"': 'café.md',      # noprefix
+        }
+        for header, expected in cases.items():
+            with self.subTest(header=header):
+                files = pr_analyzer.parse_diff(header + "\n@@ -1 +1 @@\n+x\n")
+                self.assertEqual([f.filename for f in files], [expected])
+        # Two different quoted paths without known prefixes: the rename line decides
+        files = pr_analyzer.parse_diff(
+            'diff --git "x/caf\\303\\251.md" "y/cafe.md"\nsimilarity index 100%\n'
+            'rename from "x/caf\\303\\251.md"\nrename to y/cafe.md\n')
+        self.assertEqual([f.filename for f in files], ['y/cafe.md'])
+
+    def test_rename_to_names_the_file_whatever_the_prefixes(self):
+        cases = (
+            ('diff --git i/old/name.py w/new/name.py', 'old/name.py', 'new/name.py'),
+            ('diff --git old/name.py new/name.py', 'old/name.py', 'new/name.py'),
+            # " b/" inside the old path fooled the b/-side fallback
+            ('diff --git a/lib b/x.py b/lib b/y.py', 'lib b/x.py', 'lib b/y.py'),
+            ('diff --git a/docs/cafe.md "b/docs/caf\\303\\251.md"', 'docs/cafe.md',
+             '"docs/caf\\303\\251.md"'),
+        )
+        for header, old, new in cases:
+            with self.subTest(header=header):
+                files = pr_analyzer.parse_diff(
+                    f"{header}\nsimilarity index 100%\nrename from {old}\nrename to {new}\n")
+                self.assertEqual([f.filename for f in files],
+                                 [pr_analyzer._unquote_c_style(new) if new.startswith('"') else new])
+                self.assertEqual(files[0].change_type, 'renamed')
+                self.assertEqual(files[0].language, detect_language_of(files[0].filename))
+
+    def test_copy_to_names_the_file(self):
+        files = pr_analyzer.parse_diff(
+            "diff --git c/src/a.py w/src/b.py\nsimilarity index 90%\n"
+            "copy from src/a.py\ncopy to src/b.py\n@@ -1 +1 @@\n+x = 1\n")
+        self.assertEqual([(f.filename, f.change_type, f.additions) for f in files],
+                         [('src/b.py', 'added', 1)])
+
+    def test_ansi_colors_are_ignored(self):
+        # color.ui=always keeps escape codes in piped output
+        diff = (
+            "\x1b[1mdiff --git a/src/app.py b/src/app.py\x1b[m\n"
+            "\x1b[1mindex 1111111..2222222 100644\x1b[m\n"
+            "\x1b[1m--- a/src/app.py\x1b[m\n"
+            "\x1b[1m+++ b/src/app.py\x1b[m\n"
+            "\x1b[36m@@ -1 +1,2 @@\x1b[m\n"
+            "\x1b[31m-x = 1\x1b[m\n"
+            "\x1b[32m+\x1b[m\x1b[32mx = 2\x1b[m\n"
+            "\x1b[32m+y = 3\x1b[m\n"
+        )
+        files = pr_analyzer.parse_diff(diff)
+        self.assertEqual([(f.filename, f.additions, f.deletions) for f in files],
+                         [('src/app.py', 2, 1)])
+
+
+def detect_language_of(filename):
+    return pr_analyzer.detect_language(filename)
+
+
+@unittest.skipUnless(shutil.which('git'), 'needs git')
+class RealGitDiffTest(unittest.TestCase):
+    """Parse what git actually prints under configurations that change the format."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.repo = cls.tmp.name
+        cls.git('init', '-q')
+        cls.git('config', 'user.email', 'dev@example.com')
+        cls.git('config', 'user.name', 'Dev')
+        os.makedirs(os.path.join(cls.repo, 'force-app', 'classes'))
+        cls.write('force-app/classes/Foo.cls-meta.xml', '<apiVersion>66.0</apiVersion>\n')
+        cls.write('src/app.py', 'x = 1\n')
+        cls.write('src/old_name.py', 'y = 1\n')
+        cls.write('docs/café.md', 'old\n')  # git C-quotes non-ASCII paths
+        cls.git('add', '-A')
+        cls.git('commit', '-q', '-m', 'base')
+        cls.write('force-app/classes/Foo.cls-meta.xml', '<apiVersion>67.0</apiVersion>\n')
+        cls.write('src/app.py', 'x = 2\nz = 3\n')
+        cls.write('docs/café.md', 'new\n')
+        cls.git('mv', 'src/old_name.py', 'src/new_name.py')
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @classmethod
+    def git(cls, *args):
+        return subprocess.run(['git', '-C', cls.repo, *args], check=True,
+                              capture_output=True, text=True).stdout
+
+    @classmethod
+    def write(cls, relative, content):
+        path = os.path.join(cls.repo, *relative.split('/'))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(content)
+
+    def test_configurations_that_change_the_diff_format(self):
+        expected = {
+            'force-app/classes/Foo.cls-meta.xml': (1, 1, 'modified'),
+            'src/app.py': (2, 1, 'modified'),
+            'src/new_name.py': (0, 0, 'renamed'),
+            'docs/café.md': (1, 1, 'modified'),
+        }
+        for config in ((), ('-c', 'diff.mnemonicPrefix=true'), ('-c', 'diff.noprefix=true'),
+                       ('-c', 'color.ui=always'), ('-c', 'color.diff=always')):
+            with self.subTest(config=config):
+                diff = self.git(*config, 'diff', 'HEAD', '-M')
+                files = {f.filename: (f.additions, f.deletions, f.change_type)
+                         for f in pr_analyzer.parse_diff(diff)}
+                self.assertEqual(files, expected)
+
+    def test_api_version_bump_survives_mnemonic_prefixes(self):
+        diff = self.git('-c', 'diff.mnemonicPrefix=true', 'diff', 'HEAD')
+        meta = next(f for f in pr_analyzer.parse_diff(diff) if f.filename.endswith('-meta.xml'))
+        self.assertEqual((meta.api_version_before, meta.api_version_after), (66.0, 67.0))
 
 
 class UnquoteCStyleTest(unittest.TestCase):
@@ -754,6 +894,36 @@ class IsTestFileTest(unittest.TestCase):
         self.assertTrue(pr_analyzer.is_test_file(bundle + '__tests__/data/getRecord.json'))
         self.assertFalse(pr_analyzer.is_test_file(bundle + 'accountList.js'))
 
+    def test_flow_tests(self):
+        for path in (SF + 'flowtests/Account_Update_Test.flowtest-meta.xml',
+                     'src/flowtests/Account_Update_Test.flowtest'):
+            with self.subTest(path=path):
+                self.assertTrue(pr_analyzer.is_test_file(path))
+                self.assertEqual(pr_analyzer.detect_language(path), 'Salesforce Flow')
+        self.assertFalse(pr_analyzer.is_test_file(SF + 'flows/Account_Update.flow-meta.xml'))
+
+
+# ═══════════════════════════════════════════════════════════════
+# is_generated_file
+# ═══════════════════════════════════════════════════════════════
+
+class IsGeneratedFileTest(unittest.TestCase):
+    def test_lockfiles_snapshots_and_build_output(self):
+        for path in ('package-lock.json', 'apps/web/package-lock.json', 'npm-shrinkwrap.json',
+                     'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb', 'poetry.lock',
+                     'Pipfile.lock', 'uv.lock', 'pdm.lock',
+                     'src/__snapshots__/app.test.ts.snap', 'src/components/Button.test.tsx.snap',
+                     'public/vendor.min.js', 'public/site.min.css', 'dist/app.js.map',
+                     'static\\legacy.min.js'):
+            with self.subTest(path=path):
+                self.assertTrue(pr_analyzer.is_generated_file(path))
+
+    def test_source_files_are_not_generated(self):
+        for path in ('package.json', 'src/lock.py', 'src/snapshot.ts', 'src/admin.js',
+                     'src/map.ts', 'docs/yarn.md', SF + 'classes/Lock.cls'):
+            with self.subTest(path=path):
+                self.assertFalse(pr_analyzer.is_generated_file(path))
+
 
 # ═══════════════════════════════════════════════════════════════
 # is_config_file
@@ -1010,31 +1180,26 @@ class CategorizeSizeTest(unittest.TestCase):
             (50, 'S (Small)'), (199, 'S (Small)'),
             (200, 'M (Medium)'), (399, 'M (Medium)'),
             (400, 'L (Large)'), (799, 'L (Large)'),
-            (800, 'XL (Extra Large) - Consider splitting'),
-            (10_000, 'XL (Extra Large) - Consider splitting'),
+            (800, 'XL (Extra Large)'),
+            (10_000, 'XL (Extra Large)'),
         )
         for total_changes, expected in cases:
             with self.subTest(total_changes=total_changes):
                 self.assertEqual(pr_analyzer.categorize_size(total_changes), expected)
 
+    def test_no_human_review_time_estimate(self):
+        # The reviewer is an agent: minutes per line mean nothing to it.
+        self.assertFalse(hasattr(pr_analyzer, 'estimate_review_time'))
+        self.assertNotIn('estimated_review_time',
+                         pr_analyzer.PRAnalysis.__dataclass_fields__)
 
-class EstimateReviewTimeTest(unittest.TestCase):
-    def test_scales_with_size_and_complexity(self):
-        files = [FileStats(filename='src/app.py', additions=300, deletions=100,
-                           language='Python')]
-        self.assertEqual(pr_analyzer.estimate_review_time(files, 0.0), 20)  # 400 / 20
-        self.assertEqual(pr_analyzer.estimate_review_time(files, 0.5), 30)  # 20 * 1.5
 
-    def test_fractional_minutes_are_truncated(self):
-        files = [FileStats(filename='src/app.py', additions=219, language='Python')]
-        self.assertEqual(pr_analyzer.estimate_review_time(files, 0.0), 10)  # 10.95
-
-    def test_clamped_to_5_and_120_minutes(self):
-        self.assertEqual(pr_analyzer.estimate_review_time([], 0.0), 5)
-        small = [FileStats(filename='src/app.py', additions=40, language='Python')]
-        self.assertEqual(pr_analyzer.estimate_review_time(small, 1.0), 5)  # 4
-        huge = [FileStats(filename='src/app.py', additions=5000, language='Python')]
-        self.assertEqual(pr_analyzer.estimate_review_time(huge, 1.0), 120)  # 500
+class ReviewableChangesTest(unittest.TestCase):
+    def test_generated_files_are_excluded(self):
+        files = [make_file('package-lock.json', 3000, 2900), make_file('package.json', 1, 1),
+                 make_file('src/__snapshots__/a.test.ts.snap', 40, 0)]
+        self.assertEqual(pr_analyzer.reviewable_changes(files), 2)
+        self.assertEqual(pr_analyzer.reviewable_changes([]), 0)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1123,13 +1288,59 @@ class IdentifyRiskFactorsTest(unittest.TestCase):
                 self.assertEqual(low_ratio in self.risks_for(code_lines, test_lines), flagged)
 
     def test_security_sensitive_patterns(self):
-        for filename in ('.env.production', 'src/oauth.py', 'security/policy.py',
-                         'src/reset_password.py', 'src/TokenStore.ts', 'src/secret_manager.py'):
+        for filename in ('.env', '.env.production', '.envrc', 'src/oauth.py', 'security/policy.py',
+                         'src/reset_password.py', 'src/TokenStore.ts', 'src/secret_manager.py',
+                         SF + 'classes/OAuthService.cls', 'src/JWTHelper.ts',
+                         'src/auth/login.py', 'config/credentials.yml'):
             with self.subTest(filename=filename):
                 risks = pr_analyzer.identify_risk_factors([make_file(filename)])
                 self.assertIn(f"Security-sensitive file: {filename}", risks)
-        self.assertFalse(any('Security-sensitive' in r for r in
-                             pr_analyzer.identify_risk_factors([make_file('src/app.py')])))
+
+    def test_security_words_match_whole_words_only(self):
+        # Substrings used to match: auth in Author, token in Aura .tokens bundles,
+        # .env in .environment
+        for filename in ('src/app.py', SF + 'classes/AuthorService.cls',
+                         SF + 'classes/AuthorityRanking.cls',
+                         SF + 'aura/BrandTokens/BrandTokens.tokens',
+                         SF + 'aura/BrandTokens/BrandTokens.tokens-meta.xml',
+                         'src/environments/app.environment.ts', 'src/TokenizerService.ts',
+                         'docs/security.md',
+                         # Covered by the Salesforce integration/credential risk
+                         SF + 'namedCredentials/Billing.namedCredential-meta.xml',
+                         SF + 'authproviders/Google.authprovider-meta.xml'):
+            with self.subTest(filename=filename):
+                risks = pr_analyzer.identify_risk_factors([make_file(filename)])
+                self.assertFalse(any('Security-sensitive' in r for r in risks), risks)
+
+    def test_test_risks_count_only_testable_code(self):
+        # Docs, lockfiles, snapshots, and metadata don't need unit tests.
+        for files in (
+            [make_file('README.md', 120)],
+            [make_file('package-lock.json', 3000, 2900), make_file('package.json', 1, 1)],
+            [make_file('src/__snapshots__/app.test.ts.snap', 400)],
+            [make_file(SF + 'permissionsets/Sales.permissionset-meta.xml', 80)],
+            [make_file(SF + 'flows/Account_Update.flow-meta.xml', 300, 200)],
+            [make_file(SF + 'profiles/Admin.profile-meta.xml', 1500, 1500)],
+            [make_file('src/legacy.py', 0, 300, change_type='deleted')],
+        ):
+            with self.subTest(files=[f.filename for f in files]):
+                risks = pr_analyzer.identify_risk_factors(files)
+                self.assertFalse(has_risk_code(risks, RISK_NO_TESTS), risks)
+                self.assertNotIn("Low test ratio (<20%) - consider adding more tests", risks)
+
+    def test_testable_code_still_needs_tests(self):
+        for filename in ('src/app.py', 'src/index.ts', 'web/app.jsx',
+                         SF + 'lwc/accountList/accountList.js',
+                         SF + 'aura/AccountCard/AccountCardController.js',
+                         SF + 'classes/AccountService.cls'):
+            with self.subTest(filename=filename):
+                risks = pr_analyzer.identify_risk_factors([make_file(filename, 120)])
+                self.assertTrue(has_risk_code(risks, RISK_NO_TESTS), risks)
+
+    def test_generated_files_do_not_make_a_large_pr(self):
+        risks = pr_analyzer.identify_risk_factors(
+            [make_file('package-lock.json', 3000, 2900), make_file('package.json', 1, 1)])
+        self.assertFalse(any('Large PR' in r for r in risks), risks)
 
     def test_security_and_database_reported_once(self):
         files = [
@@ -1344,14 +1555,22 @@ class SalesforceRiskTest(unittest.TestCase):
             "+    <apiVersion>67.0</apiVersion>\n"
         )
         risks = pr_analyzer.identify_risk_factors(pr_analyzer.parse_diff(diff))
-        self.assertIn(
-            "Apex class apiVersion raised to 67.0+ on 1 file(s) - classes without a sharing "
-            "keyword (and undeclared classes in their inheritance chain) become 'with sharing', "
-            "database operations run in user mode, and WITH SECURITY_ENFORCED no longer "
-            "compiles", risks)
+        self.assertIn(self.CLASS_BUMP.format(1), risks)
 
-    def test_trigger_api_version_raised_to_67_not_flagged(self):
-        # Triggers run in system mode at every API version, so the bump changes nothing there.
+    CLASS_BUMP = (
+        "Apex class apiVersion raised to 67.0+ on {} file(s) - classes without a sharing "
+        "keyword run 'with sharing' unless a parent class declares one (undeclared subclasses "
+        "saved at older versions switch too), database operations run in user mode, and "
+        "WITH SECURITY_ENFORCED no longer compiles")
+    TRIGGER_BUMP = (
+        "Apex trigger apiVersion raised to 67.0+ on {} file(s) - SOQL, SOSL, and DML in the "
+        "trigger body run in user mode (sharing, CRUD, and FLS) unless they specify system "
+        "mode; the trigger context itself stays without sharing")
+
+    def test_trigger_api_version_raised_to_67_flagged(self):
+        # Apex Developer Guide v67.0, "Implementation in Apex Triggers": database
+        # operations within trigger bodies run in user mode unless system mode is
+        # explicitly specified.
         path = SF + 'triggers/AccountTrigger.trigger-meta.xml'
         diff = (
             f"diff --git a/{path} b/{path}\n"
@@ -1362,15 +1581,50 @@ class SalesforceRiskTest(unittest.TestCase):
             "+    <apiVersion>67.0</apiVersion>\n"
         )
         risks = pr_analyzer.identify_risk_factors(pr_analyzer.parse_diff(diff))
-        self.assertNoRiskContains(risks, 'apiVersion raised')
+        self.assertIn(self.TRIGGER_BUMP.format(1), risks)
+        self.assertNoRiskContains(risks, 'Apex class apiVersion raised')
 
     def test_api_version_change_without_crossing_67_not_flagged(self):
-        for before, after in ((67.0, 68.0), (None, 67.0), (60.0, 66.0), (67.0, 66.0)):
-            with self.subTest(before=before, after=after):
-                f = make_file(SF + 'classes/AccountService.cls-meta.xml', 1, 1)
-                f.api_version_before = before
-                f.api_version_after = after
-                self.assertNoRiskContains(self.risks(f), 'apiVersion raised')
+        for path in (SF + 'classes/AccountService.cls-meta.xml',
+                     SF + 'triggers/AccountTrigger.trigger-meta.xml'):
+            for before, after in ((67.0, 68.0), (None, 67.0), (60.0, 66.0), (67.0, 66.0)):
+                with self.subTest(path=path, before=before, after=after):
+                    f = make_file(path, 1, 1)
+                    f.api_version_before = before
+                    f.api_version_after = after
+                    self.assertNoRiskContains(self.risks(f), 'apiVersion raised')
+
+    def test_renamed_metadata_flagged(self):
+        risks = self.risks(
+            make_file(SF + 'classes/InvoiceService.cls', 0, 0, change_type='renamed'),
+            make_file(SF + 'classes/InvoiceService.cls-meta.xml', 0, 0, change_type='renamed'),
+            make_file(SF + 'objects/Account/fields/Level__c.field-meta.xml', 0, 0,
+                      change_type='renamed'),
+            # Not deployable: scripts and Jest tests
+            make_file('scripts/apex/seed.apex', 0, 0, change_type='renamed'),
+            make_file(SF + 'lwc/list/__tests__/list.test.js', 0, 0, change_type='renamed'),
+            make_file('src/app.py', 0, 0, change_type='renamed'),
+        )
+        self.assertIn(
+            "Salesforce metadata renamed in source (2 file(s)) - the old API name stays in orgs "
+            "until destructiveChanges removes it, and references to it break", risks)
+
+    def test_flow_definition_in_source_flagged(self):
+        risks = self.risks(
+            make_file(SF + 'flowDefinitions/Account_Update.flowDefinition-meta.xml', 5, 0))
+        self.assertIn(
+            "FlowDefinition in source (1 file(s)) - its activeVersionNumber overrides each "
+            "flow's <status> on every deploy; commit one only for a one-off deactivation "
+            "(activeVersionNumber 0)", risks)
+        self.assertNoRiskContains(self.risks(make_file(SF + 'flows/Account_Update.flow-meta.xml')),
+                                  'FlowDefinition in source')
+
+    def test_flow_tests_are_tests_not_flow_changes(self):
+        risks = self.risks(
+            make_file(SF + 'flows/Account_Update.flow-meta.xml'),
+            make_file(SF + 'flowtests/Account_Update_Test.flowtest-meta.xml'),
+        )
+        self.assertRiskContains(risks, 'Flow changed (1 file(s))')
 
     def test_non_salesforce_pr_has_no_salesforce_risks(self):
         risks = self.risks(
@@ -1450,30 +1704,37 @@ class SalesforceRiskTest(unittest.TestCase):
     def test_salesforce_risk_order(self):
         class_meta = make_file(SF + 'classes/Billing.cls-meta.xml', 1, 1)
         class_meta.api_version_before, class_meta.api_version_after = 66.0, 67.0
+        trigger_meta = make_file(SF + 'triggers/AccountTrigger.trigger-meta.xml', 1, 1)
+        trigger_meta.api_version_before, trigger_meta.api_version_after = 66.0, 67.0
         risks = self.risks(
             make_file(SF + 'permissionsets/Sales.permissionset-meta.xml'),
             make_file(SF + 'namedCredentials/Billing.namedCredential-meta.xml'),
             make_file(SF + 'classes/AccountService.cls'),
             make_file(SF + 'triggers/AccountTrigger.trigger'),
             make_file(SF + 'flows/Account_Update.flow-meta.xml'),
+            make_file(SF + 'flowDefinitions/Account_Update.flowDefinition-meta.xml'),
             make_file(SF + 'objects/Account/fields/Tier__c.field-meta.xml'),
             make_file('manifest/destructiveChanges.xml'),
             make_file(SF + 'classes/Legacy.cls', 0, 10, change_type='deleted'),
+            make_file(SF + 'classes/Renamed.cls', 0, 0, change_type='renamed'),
             class_meta,
+            trigger_meta,
         )
         # Generic risks come first, then the Salesforce ones in a fixed order
         prefixes = (
-            RISK_NO_TESTS + ':',
             'Configuration changes in 1 file(s)',
             'Salesforce access-control metadata changed (1 file(s):',
             'Salesforce integration/credential metadata changed (1 file(s):',
-            f'{RISK_APEX_NO_TESTS}: 2 Apex class/trigger file(s) changed',
+            f'{RISK_APEX_NO_TESTS}: 3 Apex class/trigger file(s) changed',
             'Apex trigger changed (1 file(s))',
-            'Flow changed (1 file(s))',
+            'Flow changed (2 file(s))',
+            'FlowDefinition in source (1 file(s))',
             'Salesforce schema changed (1 object/field/validation rule file(s))',
             'Destructive changes manifest present',
             'Salesforce metadata deleted from source (1 file(s))',
+            'Salesforce metadata renamed in source (1 file(s))',
             'Apex class apiVersion raised to 67.0+ on 1 file(s)',
+            'Apex trigger apiVersion raised to 67.0+ on 1 file(s)',
         )
         self.assertEqual(len(risks), len(prefixes), risks)
         for risk, prefix in zip(risks, prefixes):
@@ -1515,7 +1776,7 @@ class GenerateSuggestionsTest(unittest.TestCase):
         files = [FileStats(filename='big.py', additions=600, deletions=300,
                            language='Python')]
         result = pr_analyzer.generate_suggestions(files, 0.3, [])
-        self.assertTrue(any('splitting' in s.lower() for s in result))
+        self.assertIn(self.TRIAGE_LINE, result)
 
     def test_no_tests_suggestion(self):
         files = [FileStats(filename='app.py', additions=40, deletions=20,
@@ -1572,10 +1833,14 @@ class GenerateSuggestionsTest(unittest.TestCase):
         result = pr_analyzer.generate_suggestions(
             [make_file(SF + 'classes/AccountService.cls')], 0.1, risks)
         self.assertIn(
-            "Request Apex test updates: bulk (200+ records), negative paths, and "
-            "System.runAs() permission cases with meaningful Assert messages", result)
+            "Request Apex test updates: bulk (201+ records, so a second trigger chunk runs), "
+            "negative paths, and System.runAs() permission cases with meaningful Assert "
+            "messages", result)
         # APEX_NO_TEST_CHANGES must not be mistaken for NO_TEST_CHANGES
-        self.assertNotIn("Request test additions before approval", result)
+        self.assertNotIn(self.NO_TESTS_LINE, result)
+
+    NO_TESTS_LINE = ("No tests changed: check that the changed code paths are covered, and ask "
+                     "for tests where behavior changed")
 
     def test_load_guides_line(self):
         files = [make_file(SF + 'classes/AccountService.cls'),
@@ -1600,20 +1865,31 @@ class GenerateSuggestionsTest(unittest.TestCase):
         result = pr_analyzer.generate_suggestions(files, 0.1, [])
         self.assertFalse(any('Salesforce' in s for s in result))
 
+    TRIAGE_LINE = ("Very large diff: review the riskiest files first, and list anything not "
+                   "reviewed under Scope in the review")
+
     def test_split_threshold(self):
-        split = "Consider splitting this PR into smaller, focused changes"
         at_limit = [FileStats(filename='big.py', additions=800, language='Python')]
         over_limit = [FileStats(filename='big.py', additions=801, language='Python')]
-        self.assertNotIn(split, pr_analyzer.generate_suggestions(at_limit, 0.3, []))
-        self.assertIn(split, pr_analyzer.generate_suggestions(over_limit, 0.3, []))
+        self.assertNotIn(self.TRIAGE_LINE, pr_analyzer.generate_suggestions(at_limit, 0.3, []))
+        self.assertIn(self.TRIAGE_LINE, pr_analyzer.generate_suggestions(over_limit, 0.3, []))
+
+    def test_generated_lines_do_not_trigger_triage(self):
+        files = [make_file('package-lock.json', 3000, 2900), make_file('package.json', 1, 1)]
+        self.assertNotIn(self.TRIAGE_LINE, pr_analyzer.generate_suggestions(files, 0.3, []))
+
+    def test_no_human_process_advice(self):
+        files = [make_file('src/app.py', 900, 0)]
+        joined = ' '.join(pr_analyzer.generate_suggestions(files, 0.9, [])).lower()
+        for phrase in ('pair review', 'review time', 'splitting this pr', 'before approval'):
+            self.assertNotIn(phrase, joined)
 
     def test_high_complexity_threshold(self):
-        high = ["High complexity - allocate extra review time",
-                "Consider pair reviewing for critical sections"]
+        high = ("High complexity: split the review by area (for example one pass per stack), "
+                "each with only its guides")
         files = [make_file('src/app.py')]
-        at_limit = pr_analyzer.generate_suggestions(files, 0.7, [])
-        self.assertFalse(set(high) & set(at_limit))
-        self.assertEqual(pr_analyzer.generate_suggestions(files, 0.71, [])[:2], high)
+        self.assertNotIn(high, pr_analyzer.generate_suggestions(files, 0.7, []))
+        self.assertEqual(pr_analyzer.generate_suggestions(files, 0.71, [])[0], high)
 
     def test_sql_suggestion(self):
         sql = "Review for SQL injection and query performance"
@@ -1645,8 +1921,8 @@ class GenerateSuggestionsTest(unittest.TestCase):
         risks = pr_analyzer.identify_risk_factors(files)
         result = pr_analyzer.generate_suggestions(files, 0.9, risks)
         prefixes = (
-            'Consider splitting', 'High complexity', 'Consider pair reviewing',
-            'Request test additions', 'Check for proper type usage', 'Review for SQL injection',
+            'Very large diff', 'High complexity',
+            'No tests changed', 'Check for proper type usage', 'Review for SQL injection',
             'Salesforce change:', 'Apex:', 'LWC/Aura:', 'Visualforce:', 'Flows:',
             'Request Apex test updates', 'Load guides:',
         )
@@ -1757,15 +2033,34 @@ class RecommendGuidesTest(unittest.TestCase):
                 self.assertEqual(self.guides(filename), expected)
 
     def test_nest_files(self):
-        expected = [GUIDE_JAVASCRIPT, GUIDE_TYPESCRIPT, GUIDE_NODEJS, GUIDE_NESTJS]
-        for filename in ('src/users/users.controller.ts', 'src/users/users.module.ts',
-                         'src/users/dto/create-user.dto.ts',
+        # Only suffixes Angular does not share; NestJS no longer pulls in Node.js
+        expected = [GUIDE_JAVASCRIPT, GUIDE_TYPESCRIPT, GUIDE_NESTJS]
+        for filename in ('src/users/users.controller.ts', 'src/users/dto/create-user.dto.ts',
+                         'src/users/user.entity.ts', 'src/events/events.gateway.ts',
+                         'src/common/http-exception.filter.ts', 'src/auth/jwt.strategy.ts',
                          'test/users.controller.e2e-spec.ts'):
             with self.subTest(filename=filename):
                 self.assertEqual(self.guides(filename), expected)
 
+    def test_suffixes_shared_with_angular_need_a_content_hint(self):
+        for filename in ('src/app/app.module.ts', 'src/app/users.service.ts',
+                         'src/app/auth.guard.ts', 'src/app/auth.interceptor.ts',
+                         'src/app/money.pipe.ts', 'src/app/user.resolver.ts'):
+            with self.subTest(filename=filename):
+                self.assertEqual(self.guides(filename), [GUIDE_JAVASCRIPT, GUIDE_TYPESCRIPT])
+
     def test_nest_cli_json(self):
-        self.assertEqual(self.guides('nest-cli.json'), [GUIDE_NODEJS, GUIDE_NESTJS])
+        self.assertEqual(self.guides('nest-cli.json'), [GUIDE_NESTJS])
+
+    def test_nest_hint_adds_nestjs_guide(self):
+        f = make_file('src/users/users.service.ts')
+        f.uses_nest = True
+        self.assertEqual(pr_analyzer.recommend_guides([f]),
+                         [GUIDE_JAVASCRIPT, GUIDE_TYPESCRIPT, GUIDE_NESTJS])
+
+    def test_flow_tests_route_to_the_flow_guide(self):
+        self.assertEqual(self.guides(SF + 'flowtests/Account_Update_Test.flowtest-meta.xml'),
+                         [GUIDE_PLATFORM, GUIDE_FLOWS])
 
     def test_package_json_does_not_add_nodejs(self):
         self.assertEqual(self.guides('package.json'), [])
@@ -1787,9 +2082,11 @@ class RecommendGuidesTest(unittest.TestCase):
             SF + 'classes/AccountServiceTest.cls',
             'src/server.js',
         ]
+        files = [make_file(name) for name in filenames]
+        files[-1].uses_node = True
         expected = list(pr_analyzer.GUIDE_ORDER)
-        self.assertEqual(self.guides(*filenames), expected)
-        self.assertEqual(self.guides(*reversed(filenames)), expected)
+        self.assertEqual(pr_analyzer.recommend_guides(files), expected)
+        self.assertEqual(pr_analyzer.recommend_guides(files[::-1]), expected)
 
     def test_unknown_files_no_guides(self):
         self.assertEqual(self.guides('Makefile', 'data.xyz', 'README.md', 'src/main.rs'), [])
@@ -1828,6 +2125,64 @@ class ContentHintTest(unittest.TestCase):
                 self.assertTrue(self.parse_one(SF + 'classes/AccountService.cls', line).has_soql)
         self.assertTrue(self.parse_one(SF + 'triggers/AccountTrigger.trigger',
                                        '    [SELECT Id FROM Case]').has_soql)
+
+    def test_soql_split_across_lines(self):
+        # Prettier Apex puts the bracket and the query on separate lines
+        path = SF + 'classes/AccountSelector.cls'
+        self.assertTrue(self.parse_one(path, '    return [', '        SELECT Id, Name',
+                                       '        FROM Account', '    ];').has_soql)
+        self.assertTrue(self.parse_one(path, '    List<List<SObject>> r = [',
+                                       '        FIND :term IN ALL FIELDS', '    ];').has_soql)
+        # The bracket on an unchanged context line, the query line edited
+        diff = (f'diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n'
+                '@@ -1,4 +1,4 @@\n'
+                '     return [\n'
+                '-        SELECT Id FROM Account\n'
+                '+        SELECT Id, Name FROM Account\n'
+                '     ];\n')
+        self.assertTrue(pr_analyzer.parse_diff(diff)[0].has_soql)
+        # A bracket that opens a list literal is not a query
+        self.assertFalse(self.parse_one(path, '    Integer[] sizes = new Integer[', '        3',
+                                        '    ];').has_soql)
+
+    def test_dynamic_soql_strings(self):
+        path = SF + 'classes/AccountSelector.cls'
+        for line in ("    String q = 'SELECT Id FROM Account WHERE Name = :name';",
+                     "    String q = ' SELECT Id FROM ' + objectName;",
+                     "    String sosl = 'FIND {' + term + '} RETURNING Account';"):
+            with self.subTest(line=line):
+                self.assertTrue(self.parse_one(path, line).has_soql)
+        self.assertFalse(self.parse_one(path, "    String label = 'Select an account';").has_soql)
+
+    def test_nest_detected_from_content(self):
+        cases = (
+            ('src/users/users.service.ts', "import { Injectable } from '@nestjs/common';"),
+            ('src/app.module.ts', '@Module({ imports: [UsersModule] })'),
+            ('src/users/users.ts', "@Controller('users')"),
+            ('src/main.js', "const { NestFactory } = require('@nestjs/core');"),
+        )
+        for path, line in cases:
+            with self.subTest(path=path):
+                self.assertTrue(self.parse_one(path, line).uses_nest)
+        for path, line in (('src/app/app.module.ts', "import { NgModule } from '@angular/core';"),
+                           ('src/app/app.module.ts', '@NgModule({ declarations: [] })'),
+                           ('src/app/users.service.ts', '@Injectable()')):
+            with self.subTest(path=path, line=line):
+                self.assertFalse(self.parse_one(path, line).uses_nest)
+        self.assertFalse(self.parse_one(SF + 'classes/Nest.cls', "// '@nestjs/core'").uses_nest)
+
+    def test_apex_test_classes_detected_from_content(self):
+        path = SF + 'classes/AccountService_UT.cls'
+        self.assertFalse(pr_analyzer.is_test_file(path))
+        self.assertTrue(self.parse_one(path, '@IsTest', 'private class AccountService_UT {').is_test)
+        self.assertTrue(self.parse_one(path, '@isTest(SeeAllData=false)').is_test)
+        # Unchanged context lines count too
+        diff = (f'diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n'
+                '@@ -1,2 +1,3 @@\n @isTest\n private class AccountService_UT {\n+    // more\n')
+        self.assertTrue(pr_analyzer.parse_diff(diff)[0].is_test)
+        self.assertFalse(self.parse_one(SF + 'classes/AccountService.cls',
+                                        '    @TestVisible private Integer count;').is_test)
+        self.assertFalse(self.parse_one('src/app.py', '# @isTest').is_test)
 
     def test_soql_not_detected_elsewhere(self):
         self.assertFalse(self.parse_one(SF + 'classes/AccountService.cls',
@@ -1872,6 +2227,11 @@ class ContentHintTest(unittest.TestCase):
         guides_line = next(s for s in analysis.suggestions if s.startswith('Load guides: '))
         self.assertIn(GUIDE_SOQL, guides_line)
         self.assertIn(GUIDE_NODEJS, guides_line)
+        self.assertNotIn(GUIDE_NESTJS, guides_line)
+        nest = self.diff_for('src/users/users.service.ts',
+                             "import { Injectable } from '@nestjs/common';")
+        self.assertIn(GUIDE_NESTJS, next(s for s in pr_analyzer.analyze_pr(nest).suggestions
+                                         if s.startswith('Load guides: ')))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1936,7 +2296,6 @@ class AnalyzePRTest(unittest.TestCase):
         self.assertEqual((analysis.total_files, analysis.total_additions,
                           analysis.total_deletions), (1, 0, 0))
         self.assertEqual(analysis.size_category, 'XS (Extra Small)')
-        self.assertEqual(analysis.estimated_review_time, 5)
         # 0 * 0.4 + 1/20 * 0.2 + 1.0 * 0.2 + 1/5 * 0.2
         self.assertEqual(analysis.complexity_score, 0.25)
 
@@ -2010,15 +2369,30 @@ class AnalyzePRTest(unittest.TestCase):
         self.assertEqual(analysis.size_category, 'M (Medium)')
         # 250/1000 * 0.4 + 1/20 * 0.2 + 1.0 * 0.2 + 1/5 * 0.2
         self.assertEqual(analysis.complexity_score, 0.35)
-        self.assertEqual(analysis.estimated_review_time, 16)  # 250 / 20 * 1.35
         self.assertEqual(analysis.risk_factors, [
             f"{RISK_NO_TESTS}: No test changes - verify test coverage",
             "Low test ratio (<20%) - consider adding more tests",
         ])
         self.assertEqual(analysis.suggestions, [
-            "Request test additions before approval",
+            GenerateSuggestionsTest.NO_TESTS_LINE,
             "Load guides: reference/python.md",
         ])
+
+    def test_generated_files_do_not_count_toward_size(self):
+        lock = ''.join(f'+    "dep{i}": "1.0.{i}",\n' for i in range(900))
+        diff = (
+            "diff --git a/package-lock.json b/package-lock.json\n"
+            "--- a/package-lock.json\n+++ b/package-lock.json\n"
+            "@@ -1 +1,900 @@\n" + lock +
+            "diff --git a/package.json b/package.json\n"
+            "--- a/package.json\n+++ b/package.json\n"
+            "@@ -1 +1 @@\n-  \"dep\": \"1.0.0\"\n+  \"dep\": \"1.1.0\"\n"
+        )
+        analysis = pr_analyzer.analyze_pr(diff)
+        self.assertEqual((analysis.total_additions, analysis.total_deletions), (901, 1))
+        self.assertEqual(analysis.generated_changes, 900)
+        self.assertEqual(analysis.size_category, 'XS (Extra Small)')
+        self.assertTrue(analysis.files[0].is_generated)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2044,7 +2418,6 @@ class PrintAnalysisTest(unittest.TestCase):
             ],
             complexity_score=0.25,
             size_category='XS (Extra Small)',
-            estimated_review_time=5,
             risk_factors=risk_factors,
             suggestions=["Standard review process should suffice",
                          "Load guides: reference/python.md"],
@@ -2073,7 +2446,6 @@ class PrintAnalysisTest(unittest.TestCase):
             '',
             '📏 SIZE: XS (Extra Small)',
             '   Complexity score: 0.25/1.0',
-            '   Estimated review time: ~5 minutes',
             '',
             '⚠️  RISK FACTORS:',
             '   • Configuration changes in 1 file(s)',
@@ -2085,6 +2457,15 @@ class PrintAnalysisTest(unittest.TestCase):
             RULE,
             '',
         ]))
+
+    def test_generated_lines_are_reported_separately(self):
+        analysis = self.analysis([])
+        analysis.generated_changes = 5900
+        output = self.render(analysis)
+        self.assertIn('   Total changes: 15\n'
+                      '   Generated (lockfiles, snapshots, minified): 5900 lines, '
+                      'not counted toward size\n', output)
+        self.assertNotIn('Generated (', self.render(self.analysis([])))
 
     def test_no_risk_section_without_risks(self):
         output = self.render(self.analysis([]))
@@ -2203,7 +2584,8 @@ class MainTest(unittest.TestCase):
     def test_terminal_without_input_prints_usage(self):
         code, out, err = self.run_main(stdin=FakeStdin(tty=True))
         self.assertEqual(code, 1)
-        self.assertEqual(out, "Usage: git diff main...HEAD | python3 pr-analyzer.py\n"
+        self.assertEqual(out, "Usage: git diff --no-color --default-prefix main...HEAD | "
+                              "python3 pr-analyzer.py\n"
                               "       python3 pr-analyzer.py -f diff.txt\n")
         self.assertEqual(err, '')
 
@@ -2222,6 +2604,17 @@ class MainTest(unittest.TestCase):
             with self.subTest(content=content, source='stdin'):
                 code, out, _ = self.run_main(stdin=FakeStdin(content.encode('utf-8')))
                 self.assertEqual((code, out), (1, "No diff content provided\n"))
+
+    def test_input_without_files_is_an_error(self):
+        # Not git diff output (or a format the parser can't read): say so instead
+        # of printing an empty report that suggests nothing needs review.
+        for content in ('just some text\n', '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n',
+                        'diff --cc src/app.py\n'):
+            with self.subTest(content=content):
+                code, out, err = self.run_main('-f', self.write_diff(content))
+                self.assertEqual((code, out), (1, ''))
+                self.assertEqual(err, pr_analyzer.NO_FILES_MESSAGE + '\n')
+        self.assertIn('git diff --no-color --default-prefix', pr_analyzer.NO_FILES_MESSAGE)
 
     def test_report_is_utf8_on_a_legacy_code_page(self):
         # Windows pipes default to an ANSI code page such as cp1252, which
