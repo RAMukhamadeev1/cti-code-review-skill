@@ -88,9 +88,9 @@ Metadata diffs mix intent with retrieve noise: reordered blocks, dropped entries
 <fieldPermissions><editable>false</editable><field>Invoice__c.Credit_Note__c</field><readable>false</readable></fieldPermissions>
 ```
 
-### Search the diff with the Grep tool
+### Search the added lines of the diff
 
-Run these Grep patterns on the changed files (`git diff --name-only` lists them) and read each hit's whole block; an `<enabled>` flip on an existing permission shows in the diff without its `<name>` line.
+Look for these patterns in the added lines of the metadata diff (the lines that start with `+`), not in the whole changed files: a match in an unchanged line is not part of the change. Read each hit's whole block at the head; an `<enabled>` flip on an existing permission shows in the diff without its `<name>` line.
 
 - `<name>(ModifyAllData|ViewAllData|QueryAllFiles|ViewAllUsers|AuthorApex|CustomizeApplication|ModifyMetadata|ManageUsers|ManageInternalUsers|ResetPasswords|ManageProfilesPermissionsets|AssignPermissionSets|ManageRoles|ManageSharing|ManageRemoteAccess|ManageAuthProviders|ManageNamedCredentials|ManageEncryptionKeys|ViewEncryptedData|BypassMFAForUiLogins|PasswordNeverExpires|ManageIpAddresses|ApiEnabled|ExportReport|ViewSetup|ManageDataIntegrations)</name>`: every [high-risk permission](#treat-high-risk-permissions-as-a-security-review)
 - `<(modifyAllRecords|viewAllRecords|viewAllFields)>true<`: object-level bypasses of sharing and FLS

@@ -94,9 +94,9 @@ An element runs once per iteration when the path from the loop's `<nextValueConn
    Each_Opportunity.noMoreValuesConnector -> Update_Opportunities (one DML statement for the collection)
 ```
 
-### Search the changed flows with the Grep tool
+### Search the added lines of changed flows
 
-List the changed flows with `git diff --name-only`, then run these Grep patterns on them (glob `*.flow-meta.xml` unless noted) and read each hit in context:
+Look for these patterns in the added lines of the diff of `*.flow-meta.xml` files (the lines that start with `+`), not in the whole flows: a match in an unchanged element is not part of the change. Read each hit in its element at the head:
 
 - `<stringValue>[A-Za-z0-9]{15}([A-Za-z0-9]{3})?</stringValue>`: literals shaped like record Ids; ordinary 15- and 18-character words match too
 - `<(apiVersion|runInMode|triggerOrder|status)>`: version, run mode, order, and activation
@@ -104,7 +104,7 @@ List the changed flows with `git diff --name-only`, then run these Grep patterns
 - `\$Flow\.FaultMessage`: where raw fault text goes
 - `<isInput>true</isInput>`: variables a caller can set
 - `RecordAfterSave`: after-save flows; read their `<recordUpdates>` for filters on `$Record.Id`
-- `<actionType>apex</actionType>`: Apex actions; `@InvocableMethod` (glob `*.cls`) finds the classes
+- `<actionType>apex</actionType>`: Apex actions; the Grep tool with `@InvocableMethod` (glob `*.cls`) finds the classes
 
 Code Analyzer's flow engine is optional local analysis: run it only if it is already installed, only on trusted code (it applies the workspace's configuration), and only as [Tooling](platform.md#tooling) allows. Its rules map to this guide: `TriggerCallout`, `TriggerWaitEvent` ([Choosing the Flow Type](#choosing-the-flow-type)); `TriggerEntryCriteria`, `SameRecordUpdate` ([Entry Conditions & Recursion](#entry-conditions--recursion)); `DbInLoop` ([Bulk-Safe Design](#bulk-safe-design)); `MissingFaultHandler` ([Fault Handling](#fault-handling)); `PreventPassingUserDataIntoElementWithoutSharing` ([Run Context & Security](#run-context--security)); `HardcodedId` ([Org-Agnostic Values](#org-agnostic-values)); `DefaultCopy`, `MissingDescription`, `CyclicSubflow`, `MissingNextValueConnector`, `UnreachableElement`, `UnusedResource` ([Activation, Versions & Deployment](#activation-versions--deployment)). `MissingFaultHandler`, `MissingDescription`, `UnreachableElement`, and `UnusedResource` are outside `Recommended`; the `flow` selector includes them.
 
