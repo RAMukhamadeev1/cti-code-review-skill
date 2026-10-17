@@ -382,6 +382,47 @@ class SkillBodyTest(unittest.TestCase):
         self.assertIn('`git diff --no-color --default-prefix HEAD`', self.text)
         self.assertIn('git status --porcelain', self.text)
 
+    def line_starting(self, prefix):
+        """The one SKILL.md line that starts with prefix, leading spaces ignored."""
+        found = [line for line in self.text.split('\n') if line.lstrip().startswith(prefix)]
+        self.assertEqual(len(found), 1, prefix)
+        return found[0]
+
+    def test_s1_reports_only_what_the_change_touches(self):
+        # An older problem is a finding only when the change makes it reachable or
+        # worse, as the guides say; its severity is no way back in.
+        rule = self.line_starting('- **Review the change.**')
+        self.assertNotIn('🔴', rule)
+        self.assertRegex(rule, r'(?i)changed lines')
+        self.assertRegex(rule, r'(?i)reachable or worse.{0,40}"\(pre-existing\)"')
+        self.assertRegex(rule, r'(?i)every other older problem')
+
+    def test_s2_branch_diffs_use_three_dots(self):
+        # Two dots also show what the target gained since the fork, reversed.
+        for command in re.findall(r'`(git diff [^`]*)`', self.text):
+            with self.subTest(command=command):
+                self.assertNotRegex(command, r'(?<!\.)\.\.(?!\.)')
+        branch = self.line_starting('- Branch:')
+        self.assertIn('`git diff --no-color --default-prefix <base>...HEAD`', branch)
+        self.assertIn('`origin/<target>...origin/<source>`', branch)
+
+    def test_s2_review_reads_a_line_range_per_hunk(self):
+        review = self.line_starting('4. **Review.**')
+        self.assertRegex(review, r'(?i)enclosing function or block.{0,40}line range')
+        self.assertRegex(review, r'(?i)never the whole file')
+        self.assertRegex(review, r'(?i)Flow, LWC, Aura.{0,60}element around the hunk')
+
+    def test_s3_renamed_files_are_diffed_with_both_paths(self):
+        rename = self.line_starting('- A renamed or moved file')
+        self.assertIn('both paths', rename)
+        self.assertRegex(rename, r'(?i)only its changed lines')
+
+    def test_s4_formatting_rewrites_are_read_without_whitespace(self):
+        rewrite = self.line_starting('- A file whose diff rewrites most lines')
+        self.assertIn('-w --ignore-cr-at-eol', rewrite)
+        self.assertRegex(rewrite, r'(?i)line endings')
+        self.assertRegex(rewrite, r'(?i)under Scope.{0,40}formatting')
+
     def test_guides_are_read_checklist_first(self):
         self.assertRegex(self.text, r'(?i)review checklist.{0,120}first')
 

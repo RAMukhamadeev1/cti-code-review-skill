@@ -253,6 +253,19 @@ class CorrectedFactsTest(GuideTestCase):
     def test_awaiting_loops_are_cancellable(self):
         self.assertAbsent("Can't be cancelled cleanly", read('reference/python.md'))
 
+    def test_s5_salesforce_searches_read_the_added_lines(self):
+        # A pattern that already sat in an unchanged line is not part of the change;
+        # searching whole changed files reported those lines as findings.
+        for guide in ('reference/salesforce/metadata.md', 'reference/salesforce/flows.md'):
+            text = read(guide)
+            headings = [line for line in text.split('\n') if line.startswith('### Search')]
+            with self.subTest(guide=guide):
+                self.assertEqual(len(headings), 1, headings)
+                body = section(text, headings[0])
+                self.assertRegex(body, r'(?i)added lines')
+                self.assertAbsent('--name-only', body)
+                self.assertNotRegex(body, r'(?i)patterns on (?:the changed files|them)')
+
     def test_type_assertion_example_really_lies(self):
         # Strings have .length too, so this assertion was harmless.
         self.assertAbsent('(value as string[]).length', read('reference/typescript.md'))
